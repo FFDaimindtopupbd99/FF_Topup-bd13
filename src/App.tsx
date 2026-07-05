@@ -4,6 +4,8 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { signInWithPopup } from "firebase/auth";
+import { auth, googleProvider } from "./firebase";
 import {
   Smartphone,
   Shield,
@@ -30,21 +32,41 @@ import {
   Users,
   RefreshCw,
   Facebook,
+  MessageCircle,
+  Headphones,
+  History,
   Youtube,
   Menu,
   Check,
   ChevronRight,
   Bell,
   Edit,
-  Lock
+  Lock,
+  Star,
+  LogOut
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { CheckSiteResult, PageAnalysis, Order, Deposit, Product, ChatMessage } from "./types";
 
 export default function App() {
   // Global states synced with Express backend
-  const [wallet, setWallet] = useState<{ balance: number; userName: string; userProfilePic: string; email?: string } | null>(null);
+  const [wallet, setWallet] = useState<{ 
+    balance: number; 
+    userName: string; 
+    userProfilePic: string; 
+    email?: string;
+    referralCode?: string;
+    referralsCount?: number;
+  } | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
+  const [referredBy, setReferredBy] = useState<string | null>(null);
+  
+  // Rating states
+  const [ratingModalOpen, setRatingModalOpen] = useState(false);
+  const [ratingOrderId, setRatingOrderId] = useState<string | null>(null);
+  const [currentRating, setCurrentRating] = useState(0);
+  const [ratingHover, setRatingHover] = useState(0);
+  const [submittingRating, setSubmittingRating] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authEmail, setAuthEmail] = useState("");
   const [authName, setAuthName] = useState("");
@@ -68,7 +90,7 @@ export default function App() {
       const url = authMode === "login" ? "/api/login" : "/api/register";
       const body = authMode === "login" 
         ? { email: authEmail, password: authPassword }
-        : { email: authEmail, name: authName, password: authPassword, profilePic: authProfilePic };
+        : { email: authEmail, name: authName, password: authPassword, profilePic: authProfilePic, referredBy };
 
       const res = await fetch(url, {
         method: "POST",
@@ -96,6 +118,41 @@ export default function App() {
     }
   };
 
+  const handleGoogleSignIn = async () => {
+    setAuthLoading(true);
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      const user = result.user;
+      
+      const res = await fetch("/api/google-auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: user.email,
+          name: user.displayName,
+          profilePic: user.photoURL,
+          uid: user.uid,
+          referredBy
+        })
+      });
+      const data = await res.json();
+      
+      if (!res.ok) {
+        triggerToast(data.error || "গুগল লগইন ব্যর্থ হয়েছে!", "error");
+      } else {
+        setWallet(data.wallet);
+        setIsLoggedIn(true);
+        triggerToast(data.message || "গুগল লগইন সফল হয়েছে!", "success");
+      }
+    } catch (err: any) {
+      if (err.code !== 'auth/popup-closed-by-user') {
+        triggerToast("গুগল লগইন ব্যর্থ হয়েছে!", "error");
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   const handleLogout = async () => {
     try {
       const res = await fetch("/api/logout", { method: "POST" });
@@ -115,6 +172,7 @@ export default function App() {
 
   // Active Screen in Phone Emulator: 'home' | 'topup_form' | 'add_money' | 'orders' | 'profile' | 'video_tutorial' | 'security'
   const [activeScreen, setActiveScreen] = useState<"home" | "topup_form" | "add_money" | "orders" | "profile" | "security">("home");
+  const [accountTab, setAccountTab] = useState<"profile" | "deposits" | "referrals" | "support">("profile");
   
   // Selected category in top up form
   const [selectedCategory, setSelectedCategory] = useState<"ff_uid" | "weekly_monthly" | "offers" | "others">("ff_uid");
@@ -158,7 +216,7 @@ export default function App() {
 
   // Admin Controls state
   const [adminActiveTab, setAdminActiveTab] = useState<"orders" | "deposits" | "products" | "scanner">("orders");
-  const [mobileSecurityTab, setMobileSecurityTab] = useState<"scan" | "chat">("scan");
+  const [mobileSecurityTab, setMobileSecurityTab] = useState<"scan" | "chat" | "account">("scan");
   const [copiedText, setCopiedText] = useState("");
 
   // Notification Toast
@@ -172,6 +230,9 @@ export default function App() {
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editName, setEditName] = useState("");
   const [editProfilePic, setEditProfilePic] = useState("");
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
 
   // Sound effect synthesizer (Dual-tone chime via Web Audio API)
   const playNotificationSound = () => {
@@ -272,6 +333,14 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Check for referral code in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const ref = urlParams.get('ref');
+    if (ref) {
+      setReferredBy(ref);
+      console.log("Referred by:", ref);
+    }
+
     fetchAppState();
     // Pre-run scan for topup-secure.com
     handleRunScan("topup-secure.com");
@@ -328,6 +397,38 @@ export default function App() {
       }
     } catch (error) {
       triggerToast("সার্ভার ত্রুটি, আবার চেষ্টা করুন!", "error");
+    }
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPassword !== confirmPassword) {
+      triggerToast("নতুন পাসওয়ার্ড ম্যাচ করছে না!", "error");
+      return;
+    }
+    if (newPassword.length < 6) {
+      triggerToast("পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে", "error");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ oldPassword, newPassword })
+      });
+      const data = await response.json();
+      if (data.success) {
+        triggerToast("পাসওয়ার্ড পরিবর্তন সফল হয়েছে!", "success");
+        setOldPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setMobileSecurityTab("scan");
+      } else {
+        triggerToast(data.error || "পাসওয়ার্ড পরিবর্তন ব্যর্থ হয়েছে", "error");
+      }
+    } catch (err) {
+      triggerToast("সার্ভার ত্রুটি", "error");
     }
   };
 
@@ -546,6 +647,32 @@ export default function App() {
     }
   };
 
+  const handleRateOrder = async () => {
+    if (!ratingOrderId || currentRating === 0) return;
+    setSubmittingRating(true);
+    try {
+      const res = await fetch("/api/rate-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: ratingOrderId, rating: currentRating })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setOrders(data.orders);
+        triggerToast(data.message, "success");
+        setRatingModalOpen(false);
+        setRatingOrderId(null);
+        setCurrentRating(0);
+      } else {
+        triggerToast(data.error, "error");
+      }
+    } catch (err) {
+      triggerToast("রেটিং সাবমিট করতে ব্যর্থ হয়েছে।", "error");
+    } finally {
+      setSubmittingRating(false);
+    }
+  };
+
   // Send Chat message
   const handleSendChat = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -608,7 +735,10 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090b11] text-slate-100 font-sans antialiased overflow-x-hidden selection:bg-[#7c3aed] selection:text-white">
+    <div 
+      className="min-h-[100dvh] bg-[#090b11] text-slate-100 font-sans antialiased overflow-x-hidden"
+      onContextMenu={(e) => e.preventDefault()}
+    >
       {/* Background radial glow */}
       <div className="absolute top-0 left-1/4 w-[600px] h-[600px] rounded-full bg-violet-600/10 blur-[150px] pointer-events-none" />
       <div className="absolute bottom-10 right-10 w-[400px] h-[400px] rounded-full bg-indigo-600/10 blur-[150px] pointer-events-none" />
@@ -666,7 +796,7 @@ export default function App() {
       </header>
 
       {/* Main Workspace Layout */}
-      <main className="max-w-7xl mx-auto px-0 lg:px-6 py-0 lg:py-10 w-full">
+      <main className="w-full lg:max-w-7xl lg:mx-auto px-0 lg:px-6 py-0 lg:py-10 pb-24 lg:pb-10">
         <div className="flex flex-col lg:grid lg:grid-cols-12 gap-0 lg:gap-8 items-stretch lg:items-start w-full min-h-[100dvh] lg:min-h-0">
           
           {/* LEFT AREA: Security Scanner & Admin Controls (7 Columns) */}
@@ -869,8 +999,13 @@ export default function App() {
                     
                     <div className="w-full max-w-[340px] z-10">
                       <div className="text-center mb-6">
-                        <div className="w-14 h-14 bg-gradient-to-tr from-violet-600 to-fuchsia-600 rounded-2xl mx-auto flex items-center justify-center shadow-lg shadow-violet-900/30 mb-3 ring-1 ring-violet-500/20 animate-pulse">
-                          <Shield className="w-7 h-7 text-white" />
+                        <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center shadow-lg shadow-violet-900/30 mb-3 overflow-hidden ring-1 ring-violet-500/20">
+                          <img 
+                            src="https://www.image2url.com/r2/default/images/1783266428950-d78cd0bf-fc80-41ae-84f4-ee7c14f70361.png" 
+                            alt="FFBD TOP UP Logo" 
+                            className="w-full h-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
                         </div>
                         <h3 className="text-xl font-black text-white tracking-wider">FFBD TOP UP</h3>
                         <p className="text-xs text-slate-400 mt-1">লগইন অথবা রেজিস্টার করে টপ-আপ শুরু করুন</p>
@@ -957,6 +1092,15 @@ export default function App() {
                           </div>
                         </div>
 
+                        {authMode === "register" && referredBy && (
+                          <div className="p-2.5 bg-violet-600/10 border border-violet-500/20 rounded-xl flex items-center gap-2">
+                            <Sparkles className="w-4 h-4 text-violet-400" />
+                            <p className="text-[10px] text-slate-300">
+                              আপনি রেফারেল কোড <span className="text-violet-400 font-bold">{referredBy}</span> ব্যবহার করছেন।
+                            </p>
+                          </div>
+                        )}
+
                         {authMode === "register" && (
                           <div className="space-y-2">
                             <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">প্রোফাইল ছবি সিলেক্ট করুন</label>
@@ -1002,6 +1146,42 @@ export default function App() {
                           ) : (
                             "নিবন্ধন সম্পন্ন করুন (+১০০ TK বোনাস)"
                           )}
+                        </button>
+
+                        <div className="relative my-4">
+                          <div className="absolute inset-0 flex items-center">
+                            <span className="w-full border-t border-slate-800"></span>
+                          </div>
+                          <div className="relative flex justify-center text-[10px] uppercase">
+                            <span className="bg-[#090b11] px-2 text-slate-500 font-bold">অথবা</span>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleGoogleSignIn}
+                          disabled={authLoading}
+                          className="w-full bg-slate-900 hover:bg-slate-800 border border-slate-800 text-white font-bold py-2.5 rounded-xl text-xs transition duration-300 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                        >
+                          <svg className="w-4 h-4" viewBox="0 0 24 24">
+                            <path
+                              fill="currentColor"
+                              d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                            />
+                            <path
+                              fill="currentColor"
+                              d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                            />
+                            <path
+                              fill="currentColor"
+                              d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                            />
+                            <path
+                              fill="currentColor"
+                              d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                            />
+                          </svg>
+                          <span>Google দিয়ে লগইন করুন</span>
                         </button>
                       </form>
 
@@ -1729,7 +1909,7 @@ export default function App() {
 
                               {/* Completed State indicator */}
                               {o.status === "complete" && (
-                                <div className="mt-3 pt-2.5 border-t border-slate-800/60 space-y-1.5">
+                                <div className="mt-3 pt-2.5 border-t border-slate-800/60 space-y-2">
                                   <div className="flex justify-between items-center text-[10px]">
                                     <span className="text-slate-400 flex items-center gap-1 font-medium">
                                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
@@ -1739,6 +1919,29 @@ export default function App() {
                                       সফলভাবে ডেলিভারড!
                                     </span>
                                   </div>
+                                  
+                                  {o.rating ? (
+                                    <div className="flex items-center justify-center gap-1 py-1">
+                                      {[...Array(5)].map((_, i) => (
+                                        <Star
+                                          key={i}
+                                          className={`w-3.5 h-3.5 ${i < o.rating! ? 'fill-yellow-400 text-yellow-400' : 'text-slate-700'}`}
+                                        />
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => {
+                                        setRatingOrderId(o.id);
+                                        setRatingModalOpen(true);
+                                      }}
+                                      className="w-full py-1.5 bg-slate-850 hover:bg-slate-800 border border-slate-800 text-[10px] font-bold text-slate-300 rounded-lg flex items-center justify-center gap-1.5 transition"
+                                    >
+                                      <Star className="w-3.5 h-3.5 text-yellow-500" />
+                                      রেটিং দিন (Rate this order)
+                                    </button>
+                                  )}
+
                                   <div className="w-full h-1 bg-emerald-950 rounded-full overflow-hidden">
                                     <div className="h-full w-full bg-emerald-500 rounded-full" />
                                   </div>
@@ -1754,7 +1957,7 @@ export default function App() {
 
                   {/* SCREEN 5: User Profile View */}
                   {activeScreen === "profile" && (
-                    <div className="p-4 space-y-4">
+                    <div className="p-4 space-y-4 pb-32">
                       
                       <button
                         onClick={() => setActiveScreen("home")}
@@ -1764,59 +1967,327 @@ export default function App() {
                       </button>
 
                       {!isEditingProfile ? (
-                        <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5 text-center space-y-4">
-                          <div className="w-16 h-16 rounded-full border-2 border-violet-500 bg-slate-900 overflow-hidden flex items-center justify-center mx-auto animate-pulse-slow">
-                            {wallet.userProfilePic ? (
-                              <img src={wallet.userProfilePic} alt="User" className="w-full h-full object-cover" />
-                            ) : (
-                              <User className="w-8 h-8 text-slate-400" />
-                            )}
+                        <div className="space-y-4">
+                          {/* Account Tabs */}
+                          <div className="grid grid-cols-4 gap-1 p-1 bg-[#141624] border border-slate-800 rounded-xl">
+                            <button
+                              onClick={() => setAccountTab("profile")}
+                              className={`py-2 text-[10px] font-bold rounded-lg transition-all ${
+                                accountTab === "profile" 
+                                  ? "bg-violet-600 text-white shadow-lg" 
+                                  : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              <div className="flex flex-col items-center justify-center gap-0.5">
+                                <User className="w-3.5 h-3.5" />
+                                <span>Profile</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => setAccountTab("deposits")}
+                              className={`py-2 text-[10px] font-bold rounded-lg transition-all ${
+                                accountTab === "deposits" 
+                                  ? "bg-violet-600 text-white shadow-lg" 
+                                  : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              <div className="flex flex-col items-center justify-center gap-0.5">
+                                <History className="w-3.5 h-3.5" />
+                                <span>Deposit</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => setAccountTab("referrals")}
+                              className={`py-2 text-[10px] font-bold rounded-lg transition-all ${
+                                accountTab === "referrals" 
+                                  ? "bg-violet-600 text-white shadow-lg" 
+                                  : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              <div className="flex flex-col items-center justify-center gap-0.5">
+                                <Users className="w-3.5 h-3.5" />
+                                <span>Refer</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => setAccountTab("support")}
+                              className={`py-2 text-[10px] font-bold rounded-lg transition-all ${
+                                accountTab === "support" 
+                                  ? "bg-violet-600 text-white shadow-lg" 
+                                  : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              <div className="flex flex-col items-center justify-center gap-0.5">
+                                <Headphones className="w-3.5 h-3.5" />
+                                <span>Support</span>
+                              </div>
+                            </button>
                           </div>
 
-                          <div>
-                            <h3 className="text-sm font-bold text-slate-200">{wallet.userName}</h3>
-                            <p className="text-[10px] text-slate-400 font-mono">ID: 40291924</p>
-                          </div>
+                          {accountTab === "profile" && (
+                            <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5 text-center space-y-4">
+                              <div className="w-16 h-16 rounded-full border-2 border-violet-500 bg-slate-900 overflow-hidden flex items-center justify-center mx-auto animate-pulse-slow">
+                                {wallet.userProfilePic ? (
+                                  <img src={wallet.userProfilePic} alt="User" className="w-full h-full object-cover" />
+                                ) : (
+                                  <User className="w-8 h-8 text-slate-400" />
+                                )}
+                              </div>
 
-                          {/* Stats card */}
-                          <div className="grid grid-cols-2 gap-2 bg-[#0c0d14] rounded-xl p-3 border border-slate-850">
-                            <div>
-                              <span className="text-[9px] text-slate-400 uppercase block">Active Wallet</span>
-                              <span className="text-sm font-bold font-mono text-emerald-400">{wallet.balance} TK</span>
-                            </div>
-                            <div>
-                              <span className="text-[9px] text-slate-400 uppercase block">Total Orders</span>
-                              <span className="text-sm font-bold font-mono text-violet-400">{orders.length}</span>
-                            </div>
-                          </div>
+                              <div>
+                                <h3 className="text-sm font-bold text-slate-200">{wallet.userName}</h3>
+                                <p className="text-[10px] text-slate-400 font-mono">ID: 40291924</p>
+                              </div>
 
-                          <div className="text-left text-xs text-slate-300 space-y-2 border-t border-slate-850 pt-3 pb-2">
-                            <p className="font-bold text-[10px] text-slate-400 uppercase">Account Details</p>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Email:</span>
-                              <span className="text-slate-200 font-mono text-[11px]">taisirfoyej@gmail.com</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Joined:</span>
-                              <span className="text-slate-200">July 2026</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Account Type:</span>
-                              <span className="text-indigo-400 font-bold">Premium Customer</span>
-                            </div>
-                          </div>
+                              {/* Stats card */}
+                              <div className="grid grid-cols-2 gap-2 bg-[#0c0d14] rounded-xl p-3 border border-slate-850">
+                                <div>
+                                  <span className="text-[9px] text-slate-400 uppercase block">Active Wallet</span>
+                                  <span className="text-sm font-bold font-mono text-emerald-400">{wallet.balance} TK</span>
+                                </div>
+                                <div>
+                                  <span className="text-[9px] text-slate-400 uppercase block">Total Orders</span>
+                                  <span className="text-sm font-bold font-mono text-violet-400">{orders.length}</span>
+                                </div>
+                              </div>
 
-                          <button
-                            onClick={() => {
-                              setEditName(wallet.userName);
-                              setEditProfilePic(wallet.userProfilePic);
-                              setIsEditingProfile(true);
-                            }}
-                            className="w-full py-2.5 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 hover:border-slate-650 text-slate-200 transition rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm"
-                          >
-                            <Edit className="w-3.5 h-3.5 text-violet-400" />
-                            <span>Edit Profile</span>
-                          </button>
+                              <div className="text-left text-xs text-slate-300 space-y-2 border-t border-slate-850 pt-3 pb-2">
+                                <p className="font-bold text-[10px] text-slate-400 uppercase">Account Details</p>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Email:</span>
+                                  <span className="text-slate-200 font-mono text-[11px]">{wallet.email}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Joined:</span>
+                                  <span className="text-slate-200">July 2026</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Account Type:</span>
+                                  <span className="text-indigo-400 font-bold">Premium Customer</span>
+                                </div>
+                              </div>
+
+                              <button
+                                onClick={() => {
+                                  setEditName(wallet.userName);
+                                  setEditProfilePic(wallet.userProfilePic);
+                                  setIsEditingProfile(true);
+                                }}
+                                className="w-full py-2.5 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 hover:border-slate-650 text-slate-200 transition rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm"
+                              >
+                                <Edit className="w-3.5 h-3.5 text-violet-400" />
+                                <span>Edit Profile</span>
+                              </button>
+
+                              <button
+                                onClick={handleLogout}
+                                className="w-full py-2.5 bg-red-600/10 hover:bg-red-600/20 border border-red-500/30 text-red-500 transition rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm mt-2"
+                              >
+                                <LogOut className="w-3.5 h-3.5" />
+                                <span>লগআউট করুন</span>
+                              </button>
+                            </div>
+                          )}
+
+                          {accountTab === "deposits" && (
+                            <div className="space-y-3">
+                              <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5">
+                                <div className="flex items-center justify-between mb-4">
+                                  <div className="flex items-center gap-2">
+                                    <div className="p-1.5 bg-emerald-600/10 rounded-lg">
+                                      <History className="w-4 h-4 text-emerald-400" />
+                                    </div>
+                                    <h3 className="text-sm font-bold text-slate-200">Deposit History</h3>
+                                  </div>
+                                  <button 
+                                    onClick={fetchAppState}
+                                    className="p-1.5 hover:bg-slate-800 rounded-lg transition text-slate-400"
+                                  >
+                                    <RefreshCw className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+
+                                {deposits.filter(d => d.userEmail === wallet.email).length === 0 ? (
+                                  <div className="py-12 text-center space-y-3 bg-[#0c0d14] rounded-xl border border-slate-850">
+                                    <div className="w-12 h-12 bg-slate-800/50 rounded-full flex items-center justify-center mx-auto">
+                                      <DollarSign className="w-6 h-6 text-slate-500" />
+                                    </div>
+                                    <p className="text-[10px] text-slate-500">কোন ডিপোজিট হিস্ট্রি পাওয়া যায়নি।</p>
+                                    <button 
+                                      onClick={() => setActiveScreen("add_money")}
+                                      className="px-4 py-1.5 bg-emerald-600/20 text-emerald-400 rounded-lg text-[10px] font-bold border border-emerald-600/30"
+                                    >
+                                      টাকা অ্যাড করুন
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1 custom-scrollbar">
+                                    {deposits.filter(d => d.userEmail === wallet.email).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).map((d) => (
+                                      <div key={d.id} className="bg-[#0c0d14] border border-slate-850 rounded-xl p-3 space-y-2">
+                                        <div className="flex justify-between items-start">
+                                          <div>
+                                            <p className="text-[11px] font-bold text-slate-200">{d.paymentMethod.toUpperCase()} Deposit</p>
+                                            <p className="text-[9px] text-slate-500 font-mono">TXID: {d.transactionId}</p>
+                                          </div>
+                                          <div className={`px-2 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-wider ${
+                                            d.status === "approved" ? "bg-emerald-600/10 text-emerald-400 border border-emerald-600/20" : "bg-amber-600/10 text-amber-400 border border-amber-600/20"
+                                          }`}>
+                                            {d.status === "approved" ? "Approved" : "Pending"}
+                                          </div>
+                                        </div>
+                                        <div className="flex justify-between items-end">
+                                          <div className="text-[9px] text-slate-400 flex items-center gap-1">
+                                            <Clock className="w-3 h-3" />
+                                            {d.timestamp}
+                                          </div>
+                                          <div className="text-sm font-bold font-mono text-emerald-400">+{d.amount} TK</div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-3 flex gap-3 items-start">
+                                <HelpCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                <p className="text-[10px] text-amber-200/70 leading-relaxed">
+                                  ডিপোজিট সাধারণত ৫-৩০ মিনিটের মধ্যে অ্যাপ্রুভ করা হয়। অনেক সময় লেট হতে পারে, দয়া করে অপেক্ষা করুন।
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
+                          {accountTab === "referrals" && (
+                            <div className="space-y-4">
+                              <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5 text-center space-y-4">
+                                <div className="w-16 h-16 rounded-full border-2 border-violet-500 bg-slate-900/50 flex items-center justify-center mx-auto shadow-xl shadow-violet-900/20">
+                                  <Users className="w-8 h-8 text-violet-400" />
+                                </div>
+                                
+                                <div className="space-y-1">
+                                  <h3 className="text-sm font-bold text-slate-200">Refer & Earn</h3>
+                                  <p className="text-[10px] text-slate-400 px-4">
+                                    আপনার বন্ধুদের ইনভাইট করুন এবং প্রতিটি রেফারেলের জন্য বোনাস ইনকাম করুন!
+                                  </p>
+                                </div>
+
+                                <div className="bg-[#0c0d14] rounded-xl p-4 border border-violet-500/20 text-left space-y-3">
+                                  <div className="flex items-center gap-2">
+                                    <Sparkles className="w-4 h-4 text-violet-400" />
+                                    <h4 className="text-[10px] font-bold text-slate-200 uppercase tracking-wider">Your Referral Link</h4>
+                                  </div>
+                                  
+                                  <div className="space-y-2">
+                                    <div className="flex items-center gap-2">
+                                      <div className="flex-1 bg-[#141624] border border-slate-800 rounded-lg px-2.5 py-1.5 text-[10px] font-mono text-slate-300 truncate">
+                                        {window.location.origin}/?ref={wallet.referralCode}
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const link = `${window.location.origin}/?ref=${wallet.referralCode}`;
+                                          navigator.clipboard.writeText(link);
+                                          triggerToast("লিঙ্কটি কপি করা হয়েছে!", "success");
+                                        }}
+                                        className="p-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition shrink-0"
+                                      >
+                                        <Copy className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                    
+                                    <div className="flex justify-between items-center text-[10px] pt-1">
+                                      <span className="text-slate-400">মোট রেফারেল:</span>
+                                      <span className="font-bold text-violet-400">{wallet.referralsCount || 0} জন</span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div className="p-3 bg-emerald-600/10 border border-emerald-600/20 rounded-xl text-center">
+                                    <span className="text-[9px] text-slate-400 block uppercase">Bonus Earned</span>
+                                    <span className="text-sm font-bold text-emerald-400">{(wallet.referralsCount || 0) * 20} TK</span>
+                                  </div>
+                                  <div className="p-3 bg-violet-600/10 border border-violet-600/20 rounded-xl text-center">
+                                    <span className="text-[9px] text-slate-400 block uppercase">Reward per Ref</span>
+                                    <span className="text-sm font-bold text-violet-400">20 TK</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="bg-[#141624] border border-slate-800 rounded-2xl p-4">
+                                <h4 className="text-[11px] font-bold text-slate-200 mb-3 flex items-center gap-2">
+                                  <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                  Recent Referrals
+                                </h4>
+                                <div className="py-8 text-center bg-[#0c0d14] rounded-xl border border-slate-850">
+                                  <p className="text-[10px] text-slate-500 italic">No recent referral activity found.</p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {accountTab === "support" && (
+                            <div className="space-y-4">
+                              <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5 text-center space-y-4">
+                                <div className="w-16 h-16 rounded-full border-2 border-emerald-500 bg-slate-900/50 flex items-center justify-center mx-auto shadow-xl shadow-emerald-900/20">
+                                  <Headphones className="w-8 h-8 text-emerald-400" />
+                                </div>
+                                
+                                <div className="space-y-1">
+                                  <h3 className="text-sm font-bold text-slate-200">Customer Support</h3>
+                                  <p className="text-[10px] text-slate-400 px-4">
+                                    আমাদের সার্ভিস নিয়ে কোনো সমস্যা বা প্রশ্ন থাকলে সরাসরি যোগাযোগ করুন। আমরা ২৪/৭ আপনাদের সেবায় নিয়োজিত।
+                                  </p>
+                                </div>
+
+                                <div className="space-y-2.5 pt-2">
+                                  <a 
+                                    href="https://wa.me/8801234567890" 
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                    className="w-full py-3 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-emerald-900/20"
+                                  >
+                                    <MessageCircle className="w-4 h-4" />
+                                    <span>WhatsApp Support</span>
+                                  </a>
+                                  
+                                  <a 
+                                    href="https://t.me/ffbd_topup" 
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                    className="w-full py-3 bg-[#0088cc] hover:bg-[#0077b5] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-blue-900/20"
+                                  >
+                                    <Send className="w-4 h-4" />
+                                    <span>Telegram Support</span>
+                                  </a>
+
+                                  <a 
+                                    href="https://facebook.com/ffbd_topup" 
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                    className="w-full py-3 bg-[#1877F2] hover:bg-[#166fe5] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-blue-900/20"
+                                  >
+                                    <Facebook className="w-4 h-4" />
+                                    <span>Facebook Page</span>
+                                  </a>
+                                </div>
+                              </div>
+
+                              <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5 space-y-3">
+                                <h4 className="text-[11px] font-bold text-slate-200">সচরাচর জিজ্ঞাসিত প্রশ্ন (FAQ)</h4>
+                                <div className="space-y-2">
+                                  <div className="p-2.5 bg-[#0c0d14] rounded-lg border border-slate-850">
+                                    <p className="text-[10px] font-bold text-slate-300">টপ-আপ কতক্ষণে পাবো?</p>
+                                    <p className="text-[9px] text-slate-500 mt-1">অর্ডার করার ৫-১৫ মিনিটের মধ্যে টপ-আপ আপনার আইডিতে চলে যাবে।</p>
+                                  </div>
+                                  <div className="p-2.5 bg-[#0c0d14] rounded-lg border border-slate-850">
+                                    <p className="text-[10px] font-bold text-slate-300">টাকা অ্যাড হতে কত সময় লাগে?</p>
+                                    <p className="text-[9px] text-slate-500 mt-1">ডিপোজিট করার পর সাধারণত ৫-৩০ মিনিটের মধ্যে টাকা অ্যাড হয়।</p>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <form onSubmit={handleUpdateProfile} className="bg-[#141624] border border-slate-800 rounded-2xl p-5 space-y-4">
@@ -1911,6 +2382,12 @@ export default function App() {
                             className={`flex-1 py-1.5 text-center text-[10px] font-bold rounded-lg transition-all ${mobileSecurityTab === "chat" ? "bg-violet-600 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
                           >
                             এআই চ্যাট হেল্প
+                          </button>
+                          <button
+                            onClick={() => setMobileSecurityTab("account")}
+                            className={`flex-1 py-1.5 text-center text-[10px] font-bold rounded-lg transition-all ${mobileSecurityTab === "account" ? "bg-violet-600 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
+                          >
+                            অ্যাকাউন্ট সিকিউরিটি
                           </button>
                         </div>
 
@@ -2027,6 +2504,77 @@ export default function App() {
                                   <Send className="w-3.5 h-3.5" />
                                 </button>
                               </form>
+                            </div>
+                          </div>
+                        )}
+                        {/* SUBTAB 3: ACCOUNT SECURITY */}
+                        {mobileSecurityTab === "account" && (
+                          <div className="p-4 space-y-4">
+                            <div className="flex items-center gap-2 mb-1">
+                              <Lock className="w-4 h-4 text-amber-400" />
+                              <h4 className="text-xs font-bold text-slate-200">পাসওয়ার্ড পরিবর্তন করুন</h4>
+                            </div>
+                            
+                            <form onSubmit={handleChangePassword} className="space-y-3">
+                              <div className="space-y-1.5">
+                                <label className="text-[9px] uppercase font-bold text-slate-500 tracking-wider block">বর্তমান পাসওয়ার্ড</label>
+                                <div className="relative">
+                                  <Lock className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-500" />
+                                  <input
+                                    type="password"
+                                    value={oldPassword}
+                                    onChange={(e) => setOldPassword(e.target.value)}
+                                    placeholder="Old Password"
+                                    className="w-full bg-[#0c0d14] border border-slate-800 rounded-xl pl-8 pr-3 py-2 text-[10px] text-slate-200 focus:outline-none focus:border-violet-500 transition"
+                                    required
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <label className="text-[9px] uppercase font-bold text-slate-500 tracking-wider block">নতুন পাসওয়ার্ড</label>
+                                <div className="relative">
+                                  <Lock className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-500" />
+                                  <input
+                                    type="password"
+                                    value={newPassword}
+                                    onChange={(e) => setNewPassword(e.target.value)}
+                                    placeholder="New Password"
+                                    className="w-full bg-[#0c0d14] border border-slate-800 rounded-xl pl-8 pr-3 py-2 text-[10px] text-slate-200 focus:outline-none focus:border-violet-500 transition"
+                                    required
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <label className="text-[9px] uppercase font-bold text-slate-500 tracking-wider block">নতুন পাসওয়ার্ড নিশ্চিত করুন</label>
+                                <div className="relative">
+                                  <Lock className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-500" />
+                                  <input
+                                    type="password"
+                                    value={confirmPassword}
+                                    onChange={(e) => setConfirmPassword(e.target.value)}
+                                    placeholder="Confirm Password"
+                                    className="w-full bg-[#0c0d14] border border-slate-800 rounded-xl pl-8 pr-3 py-2 text-[10px] text-slate-200 focus:outline-none focus:border-violet-500 transition"
+                                    required
+                                  />
+                                </div>
+                              </div>
+
+                              <button
+                                type="submit"
+                                className="w-full py-2.5 bg-gradient-to-r from-amber-600 to-orange-600 text-white font-bold text-xs rounded-xl hover:opacity-90 shadow-lg shadow-amber-900/20 transition mt-2 flex items-center justify-center gap-2"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                <span>পাসওয়ার্ড আপডেট করুন</span>
+                              </button>
+                            </form>
+
+                            <div className="p-3 bg-slate-900/50 border border-slate-800 rounded-xl flex items-start gap-2.5">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                              <p className="text-[9px] text-slate-400 leading-relaxed">
+                                পাসওয়ার্ড পরিবর্তনের পর দয়া করে এটি মনে রাখুন। পাসওয়ার্ড ভুলে গেলে আপনার অ্যাকাউন্টের অ্যাক্সেস হারাতে পারেন।
+                              </p>
                             </div>
                           </div>
                         )}
@@ -2249,6 +2797,62 @@ export default function App() {
                 className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold rounded-lg transition"
               >
                 বুঝেছি, ধন্যবাদ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rating Modal */}
+      {ratingModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md">
+          <div className="w-full max-w-xs bg-[#141624] border border-slate-800 rounded-3xl overflow-hidden shadow-2xl p-6 space-y-5 animate-scale-in">
+            <div className="text-center space-y-2">
+              <div className="w-16 h-16 bg-yellow-500/10 rounded-full flex items-center justify-center mx-auto ring-4 ring-yellow-500/5">
+                <Star className="w-8 h-8 text-yellow-500 fill-yellow-500" />
+              </div>
+              <h3 className="text-lg font-bold text-white">রেটিং দিন</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">অর্ডার <span className="font-mono text-violet-400 font-bold">{ratingOrderId}</span> এর সার্ভিস কেমন লেগেছে?</p>
+            </div>
+
+            <div className="flex justify-center gap-2 py-2">
+              {[1, 2, 3, 4, 5].map((star) => (
+                <button
+                  key={star}
+                  type="button"
+                  onMouseEnter={() => setRatingHover(star)}
+                  onMouseLeave={() => setRatingHover(0)}
+                  onClick={() => setCurrentRating(star)}
+                  className="transition-transform active:scale-90"
+                >
+                  <Star
+                    className={`w-8 h-8 ${
+                      (ratingHover || currentRating) >= star
+                        ? "fill-yellow-500 text-yellow-500"
+                        : "text-slate-700"
+                    }`}
+                  />
+                </button>
+              ))}
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  setRatingModalOpen(false);
+                  setRatingOrderId(null);
+                  setCurrentRating(0);
+                }}
+                className="flex-1 py-2.5 bg-slate-850 hover:bg-slate-800 text-slate-300 font-bold text-xs rounded-xl transition"
+              >
+                বাতিল
+              </button>
+              <button
+                onClick={handleRateOrder}
+                disabled={currentRating === 0 || submittingRating}
+                className="flex-1 py-2.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-lg shadow-violet-950/30 transition"
+              >
+                {submittingRating ? "পাঠানো হচ্ছে..." : "সাবমিট করুন"}
               </button>
             </div>
           </div>

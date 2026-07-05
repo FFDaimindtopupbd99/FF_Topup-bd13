@@ -2,11 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="HandheldFriendly" content="true" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <title>A1BD TOP UP Trust Center & App Simulator</title>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      document.addEventListener('keydown', function(e) {
+        if (e.ctrlKey && (e.key === 'c' || e.key === 'v' || e.key === 's' || e.key === 'u')) {
+          e.preventDefault();
+        }
+        if (e.key === 'F12') {
+          e.preventDefault();
+        }
+      });
+      document.addEventListener('touchstart', function(e) {
+        if (e.touches.length > 1) {
+          e.preventDefault();
+        }
+      }, { passive: false });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

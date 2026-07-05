@@ -81,6 +81,7 @@ export interface Order {
   timestamp: string;
   etaSeconds?: number;
   createdAt?: number;
+  rating?: number;
 }
 
 export interface Deposit {
@@ -91,4 +92,6 @@ export interface Deposit {
   transactionId: string;
   status: "pending" | "approved" | "rejected";
   timestamp: string;
+  userEmail?: string;
+  createdAt?: number;
 }

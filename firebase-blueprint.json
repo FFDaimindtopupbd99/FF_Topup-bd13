@@ -7,11 +7,15 @@
       "properties": {
         "email": { "type": "string", "description": "User email address" },
         "name": { "type": "string", "description": "Full name of the user" },
-        "passwordHash": { "type": "string", "description": "Simple password hash/text" },
+        "passwordHash": { "type": "string", "description": "Simple password hash/text (null for OAuth users)" },
         "balance": { "type": "number", "description": "Active wallet balance in TK" },
-        "userProfilePic": { "type": "string", "description": "URL of user profile picture" }
+        "userProfilePic": { "type": "string", "description": "URL of user profile picture" },
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "authProvider": { "type": "string", "description": "Auth provider (email/google)" },
+        "referralCode": { "type": "string", "description": "Unique referral code" },
+        "referralsCount": { "type": "number", "description": "Number of users referred" }
       },
-      "required": ["email", "name", "passwordHash", "balance"]
+      "required": ["email", "name", "balance"]
     },
     "Order": {
       "title": "Order",
@@ -64,5 +68,8 @@
       "schema": "Deposit",
       "description": "Wallet deposit transactions."
     }
+  },
+  "authentication": {
+    "providers": ["google"]
   }
 }

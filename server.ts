@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
+import cookieParser from "cookie-parser";
 
 import fs from "fs";
 import { initializeApp } from "firebase/app";
@@ -22,6 +23,7 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+app.use(cookieParser("topup-trust-secret-key"));
 
 // ==========================================
 // FIREBASE / FIRESTORE DATABASE CONFIGURATION
@@ -84,6 +86,7 @@ interface Order {
   etaSeconds?: number;
   createdAt?: number;
   userEmail?: string;
+  rating?: number;
 }
 
 interface Deposit {
@@ -94,45 +97,82 @@ interface Deposit {
   transactionId: string;
   status: "pending" | "approved" | "rejected";
   timestamp: string;
+  userEmail?: string;
+  createdAt?: number;
 }
 
 // Global state
 interface UserAccount {
   email: string;
   name: string;
-  passwordHash: string;
+  passwordHash?: string;
   balance: number;
   userProfilePic: string;
+  referralCode?: string;
+  referralsCount?: number;
+  uid?: string;
+  authProvider?: string;
+  isAdmin?: boolean;
 }
 
+function getWalletObject(user: UserAccount) {
+  return {
+    balance: user.balance,
+    userName: user.name,
+    userProfilePic: user.userProfilePic,
+    email: user.email,
+    referralCode: user.referralCode,
+    referralsCount: user.referralsCount,
+    isAdmin: user.isAdmin || false
+  };
+}
+
+// let users: Record<string, UserAccount> = { ... } (already handled by getFirebaseUsers)
 let users: Record<string, UserAccount> = {
   "taisirfoyej@gmail.com": {
     email: "taisirfoyej@gmail.com",
     name: "Taisir Foyej",
     passwordHash: "123456",
     balance: 150,
-    userProfilePic: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120"
+    userProfilePic: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120",
+    isAdmin: true
   }
 };
 
-let loggedInEmail: string | null = "taisirfoyej@gmail.com";
-
-let walletBalance = 150; // fallback
-let userName = "Taisir Foyej"; // fallback
-let userProfilePic = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120"; // fallback
+function getCurrentUserEmail(req: any) {
+  return req.signedCookies.userEmail || null;
+}
 
 // ==========================================
 // FIREBASE / FIRESTORE DATA ACCESS HELPERS
 // ==========================================
+
+function generateReferralCode() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
 
 async function getFirebaseUsers(): Promise<Record<string, UserAccount>> {
   if (!db) return users;
   try {
     const querySnapshot = await getDocs(collection(db, "users"));
     const fbUsers: Record<string, UserAccount> = {};
+    let needsUpdate = false;
+    
     querySnapshot.forEach((doc) => {
-      fbUsers[doc.id] = doc.data() as UserAccount;
+      const data = doc.data() as UserAccount;
+      if (!data.referralCode) {
+        data.referralCode = generateReferralCode();
+        data.referralsCount = 0;
+        needsUpdate = true;
+      }
+      fbUsers[doc.id] = data;
     });
+
+    if (needsUpdate) {
+      for (const email in fbUsers) {
+        await setDoc(doc(db, "users", email), fbUsers[email]);
+      }
+    }
 
     // If Firebase is empty but we have local defaults, seed them
     if (Object.keys(fbUsers).length === 0 && Object.keys(users).length > 0) {
@@ -240,13 +280,6 @@ async function saveFirebaseDeposit(deposit: Deposit): Promise<void> {
   } else {
     deposits.unshift(deposit);
   }
-}
-
-function getCurrentUser(): UserAccount | null {
-  if (loggedInEmail && users[loggedInEmail]) {
-    return users[loggedInEmail];
-  }
-  return null;
 }
 
 let products: Product[] = [
@@ -672,16 +705,12 @@ app.get("/api/app-state", async (req, res) => {
   const currentUsers = await getFirebaseUsers();
   const currentOrders = await getFirebaseOrders();
   const currentDeposits = await getFirebaseDeposits();
-  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  const email = getCurrentUserEmail(req);
+  const user = email && currentUsers[email] ? currentUsers[email] : null;
 
   return res.json({
     loggedIn: !!user,
-    wallet: user ? {
-      balance: user.balance,
-      userName: user.name,
-      userProfilePic: user.userProfilePic,
-      email: user.email,
-    } : null,
+    wallet: user ? getWalletObject(user) : null,
     products,
     orders: currentOrders,
     deposits: currentDeposits
@@ -700,6 +729,7 @@ app.post("/api/add-money", async (req, res) => {
     return res.status(400).json({ error: "অনুগ্রহ করে সঠিক টাকার পরিমাণ দিন।" });
   }
 
+  const email = getCurrentUserEmail(req);
   const newDeposit: Deposit = {
     id: "DEP-" + Math.floor(1000 + Math.random() * 9000),
     paymentMethod,
@@ -708,16 +738,18 @@ app.post("/api/add-money", async (req, res) => {
     transactionId,
     status: "approved", // Automatically approved for seamless client simulation
     timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
+    userEmail: email || undefined,
+    createdAt: Date.now()
   };
 
   await saveFirebaseDeposit(newDeposit);
   const currentUsers = await getFirebaseUsers();
-  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  const user = email && currentUsers[email] ? currentUsers[email] : null;
   if (user) {
     user.balance += amt;
     await saveFirebaseUser(user);
   } else {
-    walletBalance += amt; // Add balance automatically to wallet fallback
+    return res.status(401).json({ error: "অনুগ্রহ করে লগইন করুন!" });
   }
   console.log(`New deposit submitted and auto-approved: ${amount} TK via ${paymentMethod}`);
 
@@ -725,16 +757,7 @@ app.post("/api/add-money", async (req, res) => {
   return res.json({
     message: "আপনার ট্রানজেকশনটি সফলভাবে যাচাই করা হয়েছে এবং ওয়ালেট ব্যালেন্স যোগ করা হয়েছে!",
     deposits: latestDeposits,
-    wallet: user ? {
-      balance: user.balance,
-      userName: user.name,
-      userProfilePic: user.userProfilePic,
-      email: user.email,
-    } : {
-      balance: walletBalance,
-      userName,
-      userProfilePic
-    }
+    wallet: user ? getWalletObject(user) : null
   });
 });
 
@@ -755,21 +778,21 @@ app.post("/api/topup-order", async (req, res) => {
   const totalPrice = product.price * qty;
 
   const currentUsers = await getFirebaseUsers();
-  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  const email = getCurrentUserEmail(req);
+  const user = email && currentUsers[email] ? currentUsers[email] : null;
 
   // Check if wallet payment is selected but insufficient balance
   if (paymentMethod === "wallet") {
-    const activeBalance = user ? user.balance : walletBalance;
+    if (!user) {
+      return res.status(401).json({ error: "ওয়ালেট দিয়ে পেমেন্ট করতে অনুগ্রহ করে লগইন করুন!" });
+    }
+    const activeBalance = user.balance;
     if (activeBalance < totalPrice) {
       return res.status(400).json({ error: `আপনার ওয়ালেটে পর্যাপ্ত ব্যালেন্স নেই! প্রয়োজন ${totalPrice} TK, কিন্তু আছে ${activeBalance} TK` });
     }
     // Deduct balance instantly
-    if (user) {
-      user.balance -= totalPrice;
-      await saveFirebaseUser(user);
-    } else {
-      walletBalance -= totalPrice;
-    }
+    user.balance -= totalPrice;
+    await saveFirebaseUser(user);
   }
 
   const newOrder: Order = {
@@ -803,16 +826,42 @@ app.post("/api/topup-order", async (req, res) => {
   return res.json({
     message: "অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে! এটি বর্তমানে প্রসেসিং অবস্থায় রয়েছে এবং শীঘ্রই ডেলিভার করা হবে।",
     orders: latestOrders,
-    wallet: user ? {
-      balance: user.balance,
-      userName: user.name,
-      userProfilePic: user.userProfilePic,
-      email: user.email
-    } : {
-      balance: walletBalance,
-      userName,
-      userProfilePic
-    }
+    wallet: user ? getWalletObject(user) : null
+  });
+});
+
+// 3.5. Rate an order
+app.post("/api/rate-order", async (req, res) => {
+  const { orderId, rating } = req.body;
+  
+  if (!orderId || !rating) {
+    return res.status(400).json({ error: "অর্ডার আইডি এবং রেটিং প্রদান করা আবশ্যক!" });
+  }
+
+  const r = parseInt(rating);
+  if (isNaN(r) || r < 1 || r > 5) {
+    return res.status(400).json({ error: "রেটিং ১ থেকে ৫ এর মধ্যে হতে হবে।" });
+  }
+
+  const currentOrders = await getFirebaseOrders();
+  const order = currentOrders.find(o => o.id === orderId);
+
+  if (!order) {
+    return res.status(404).json({ error: "অর্ডারটি খুঁজে পাওয়া যায়নি!" });
+  }
+
+  if (order.status !== "complete") {
+    return res.status(400).json({ error: "শুধুমাত্র সম্পন্ন হওয়া অর্ডারে রেটিং দেওয়া যাবে।" });
+  }
+
+  order.rating = r;
+  await saveFirebaseOrder(order);
+  console.log(`User rated order ${orderId} with ${r} stars.`);
+
+  const latestOrders = await getFirebaseOrders();
+  return res.json({
+    message: "আপনার মূল্যবান রেটিং প্রদানের জন্য ধন্যবাদ!",
+    orders: latestOrders
   });
 });
 
@@ -834,12 +883,15 @@ app.post("/api/admin/approve-deposit", async (req, res) => {
   await saveFirebaseDeposit(deposit);
 
   const currentUsers = await getFirebaseUsers();
-  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  const email = getCurrentUserEmail(req);
+  const user = email && currentUsers[email] ? currentUsers[email] : null;
   if (user) {
     user.balance += deposit.amount;
     await saveFirebaseUser(user);
   } else {
-    walletBalance += deposit.amount; // Add to balance
+    // Admin approve but user not logged in in this session? 
+    // We should probably find the user by some other ID, but for now we'll just handle logged in user
+    return res.status(401).json({ error: "ইউজার খুঁজে পাওয়া যায়নি!" });
   }
   console.log(`Deposit ${depositId} approved! Added ${deposit.amount} TK to user wallet.`);
 
@@ -852,11 +904,7 @@ app.post("/api/admin/approve-deposit", async (req, res) => {
       userName: user.name,
       userProfilePic: user.userProfilePic,
       email: user.email,
-    } : {
-      balance: walletBalance,
-      userName,
-      userProfilePic
-    }
+    } : null
   });
 });
 
@@ -902,16 +950,14 @@ app.post("/api/admin/update-order-status", async (req, res) => {
 
   // Refund wallet if order is marked failed
   const currentUsers = await getFirebaseUsers();
-  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  const email = getCurrentUserEmail(req);
+  const user = email && currentUsers[email] ? currentUsers[email] : null;
   if (status === "failed" && order.paymentMethod === "wallet") {
     const targetEmail = order.userEmail || (user ? user.email : null);
     if (targetEmail && currentUsers[targetEmail]) {
       currentUsers[targetEmail].balance += order.price;
       await saveFirebaseUser(currentUsers[targetEmail]);
       console.log(`Refunded ${order.price} TK to user ${targetEmail} due to failed order.`);
-    } else {
-      walletBalance += order.price;
-      console.log(`Refunded ${order.price} TK to fallback wallet due to failed order.`);
     }
   }
 
@@ -924,11 +970,7 @@ app.post("/api/admin/update-order-status", async (req, res) => {
       userName: user.name,
       userProfilePic: user.userProfilePic,
       email: user.email,
-    } : {
-      balance: walletBalance,
-      userName,
-      userProfilePic
-    }
+    } : null
   });
 });
 
@@ -953,12 +995,8 @@ app.post("/api/admin/update-product", (req, res) => {
   });
 });
 
-// 8. Admin endpoint: Reset entire database state to defaults
+// 8.Admin endpoint: Reset entire database state to defaults
 app.post("/api/admin/reset", async (req, res) => {
-  walletBalance = 150;
-  userName = "Taisir Foyej";
-  userProfilePic = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120";
-
   const defaultUser: UserAccount = {
     email: "taisirfoyej@gmail.com",
     name: "Taisir Foyej",
@@ -968,7 +1006,7 @@ app.post("/api/admin/reset", async (req, res) => {
   };
 
   await saveFirebaseUser(defaultUser);
-  loggedInEmail = "taisirfoyej@gmail.com";
+  res.cookie("userEmail", "taisirfoyej@gmail.com", { signed: true, maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true });
 
   const defaultOrders: Order[] = [
     {
@@ -1049,7 +1087,8 @@ app.post("/api/admin/reset", async (req, res) => {
   const latestOrders = await getFirebaseOrders();
   const latestDeposits = await getFirebaseDeposits();
   const latestUsers = await getFirebaseUsers();
-  const user = loggedInEmail && latestUsers[loggedInEmail] ? latestUsers[loggedInEmail] : null;
+  const email = getCurrentUserEmail(req);
+  const user = email && latestUsers[email] ? latestUsers[email] : null;
 
   return res.json({
     message: "স্টেট সফলভাবে রিসেট করা হয়েছে!",
@@ -1058,11 +1097,7 @@ app.post("/api/admin/reset", async (req, res) => {
       userName: user.name,
       userProfilePic: user.userProfilePic,
       email: user.email
-    } : {
-      balance: walletBalance,
-      userName,
-      userProfilePic
-    },
+    } : null,
     orders: latestOrders,
     deposits: latestDeposits
   });
@@ -1077,7 +1112,9 @@ app.post("/api/update-profile", async (req, res) => {
   }
 
   const currentUsers = await getFirebaseUsers();
-  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  const email = getCurrentUserEmail(req);
+  const user = email && currentUsers[email] ? currentUsers[email] : null;
+  
   if (user) {
     user.name = name.trim();
     if (profilePic !== undefined) {
@@ -1085,33 +1122,48 @@ app.post("/api/update-profile", async (req, res) => {
     }
     await saveFirebaseUser(user);
   } else {
-    userName = name.trim();
-    if (profilePic !== undefined) {
-      userProfilePic = profilePic.trim();
-    }
+    return res.status(401).json({ error: "অনুগ্রহ করে লগইন করুন!" });
   }
 
   const updatedUsers = await getFirebaseUsers();
-  const updatedUser = loggedInEmail && updatedUsers[loggedInEmail] ? updatedUsers[loggedInEmail] : null;
+  const updatedUser = email && updatedUsers[email] ? updatedUsers[email] : null;
+  
   return res.json({
     message: "প্রোফাইল সফলভাবে আপডেট করা হয়েছে!",
     wallet: updatedUser ? {
       balance: updatedUser.balance,
       userName: updatedUser.name,
       userProfilePic: updatedUser.userProfilePic,
-      email: updatedUser.email
-    } : {
-      balance: walletBalance,
-      userName,
-      userProfilePic
-    }
+      email: updatedUser.email,
+      referralCode: updatedUser.referralCode,
+      referralsCount: updatedUser.referralsCount
+    } : null
   });
+});
+
+app.post("/api/change-password", async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+  const currentUsers = await getFirebaseUsers();
+  const email = getCurrentUserEmail(req);
+  const user = email && currentUsers[email] ? currentUsers[email] : null;
+
+  if (!user) {
+    return res.status(401).json({ error: "অননুমোদিত অ্যাক্সেস" });
+  }
+
+  if (user.passwordHash !== oldPassword) {
+    return res.status(400).json({ error: "বর্তমান পাসওয়ার্ড ভুল!" });
+  }
+
+  user.passwordHash = newPassword;
+  await saveFirebaseUser(user);
+  return res.json({ success: true });
 });
 
 
 // 8.6. API Endpoint: User Registration (নিবন্ধন)
 app.post("/api/register", async (req, res) => {
-  const { email, name, password, profilePic } = req.body;
+  const { email, name, password, profilePic, referredBy } = req.body;
   
   if (!email || !name || !password) {
     return res.status(400).json({ error: "ইমেইল, নাম এবং পাসওয়ার্ড দেওয়া আবশ্যক!" });
@@ -1128,19 +1180,36 @@ app.post("/api/register", async (req, res) => {
     name: name.trim(),
     passwordHash: password,
     balance: 100, // 100 TK sign up bonus!
-    userProfilePic: profilePic ? profilePic.trim() : "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120"
+    userProfilePic: profilePic ? profilePic.trim() : "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120",
+    referralCode: generateReferralCode(),
+    referralsCount: 0
   };
+
+  // Handle Referral
+  let referralMessage = "";
+  if (referredBy) {
+    const referrer = Object.values(currentUsers).find(u => u.referralCode === referredBy);
+    if (referrer) {
+      referrer.balance += 20; // 20 TK bonus for referrer
+      referrer.referralsCount = (referrer.referralsCount || 0) + 1;
+      await saveFirebaseUser(referrer);
+      referralMessage = " এবং রেফারেল বোনাস সফলভাবে যুক্ত হয়েছে।";
+    }
+  }
   
   await saveFirebaseUser(newUser);
-  loggedInEmail = cleanEmail;
+  
+  res.cookie("userEmail", cleanEmail, { signed: true, maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true });
   
   return res.json({
-    message: "রেজিস্ট্রেশন সফল হয়েছে! আপনাকে ১০০ TK বোনাস দেওয়া হয়েছে।",
+    message: `রেজিস্ট্রেশন সফল হয়েছে! আপনাকে ১০০ TK বোনাস দেওয়া হয়েছে${referralMessage}`,
     wallet: {
       balance: newUser.balance,
       userName: newUser.name,
       userProfilePic: newUser.userProfilePic,
-      email: newUser.email
+      email: newUser.email,
+      referralCode: newUser.referralCode,
+      referralsCount: newUser.referralsCount
     }
   });
 });
@@ -1162,23 +1231,75 @@ app.post("/api/login", async (req, res) => {
     return res.status(401).json({ error: "ইমেইল অথবা পাসওয়ার্ডটি সঠিক নয়!" });
   }
   
-  loggedInEmail = cleanEmail;
+  res.cookie("userEmail", cleanEmail, { signed: true, maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true });
   
   return res.json({
     message: "লগইন সফল হয়েছে!",
-    wallet: {
-      balance: user.balance,
-      userName: user.name,
-      userProfilePic: user.userProfilePic,
-      email: user.email
+    wallet: getWalletObject(user)
+  });
+});
+
+// 8.8. API Endpoint: Google Auth (গুগল লগইন)
+app.post("/api/google-auth", async (req, res) => {
+  const { email, name, profilePic, uid, referredBy } = req.body;
+  
+  if (!email) {
+    return res.status(400).json({ error: "গুগল ইমেইল পাওয়া যায়নি!" });
+  }
+  
+  const cleanEmail = email.trim().toLowerCase();
+  const currentUsers = await getFirebaseUsers();
+  let user = currentUsers[cleanEmail];
+  let isNewUser = false;
+  let referralMessage = "";
+  
+  if (!user) {
+    // Create new user for Google login
+    isNewUser = true;
+    user = {
+      email: cleanEmail,
+      name: name || "Google User",
+      balance: 100, // 100 TK sign up bonus
+      userProfilePic: profilePic || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120",
+      referralCode: generateReferralCode(),
+      referralsCount: 0,
+      uid: uid,
+      authProvider: "google"
+    };
+
+    // Handle Referral
+    if (referredBy) {
+      const referrer = Object.values(currentUsers).find(u => u.referralCode === referredBy);
+      if (referrer) {
+        referrer.balance += 20;
+        referrer.referralsCount = (referrer.referralsCount || 0) + 1;
+        await saveFirebaseUser(referrer);
+        referralMessage = " এবং রেফারেল বোনাস সফলভাবে যুক্ত হয়েছে।";
+      }
     }
+    
+    await saveFirebaseUser(user);
+  } else {
+    // Update existing user with Google UID if not already present
+    if (!user.uid) {
+      user.uid = uid;
+      user.authProvider = user.authProvider || "google";
+      await saveFirebaseUser(user);
+    }
+  }
+  
+  res.cookie("userEmail", cleanEmail, { signed: true, maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true });
+  
+  return res.json({
+    message: isNewUser ? `রেজিস্ট্রেশন সফল হয়েছে! আপনাকে ১০০ TK বোনাস দেওয়া হয়েছে${referralMessage}` : "লগইন সফল হয়েছে!",
+    wallet: getWalletObject(user)
   });
 });
 
 
-// 8.8. API Endpoint: User Logout (লগআউট)
+// 8.9. API Endpoint: User Logout (লগআউট)
 app.post("/api/logout", (req, res) => {
-  loggedInEmail = null;
+  res.clearCookie("userEmail");
   return res.json({
     message: "সফলভাবে লগআউট করা হয়েছে!"
   });
