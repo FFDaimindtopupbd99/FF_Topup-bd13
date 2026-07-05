@@ -1,0 +1,68 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "User account registration and wallet balance details.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "description": "User email address" },
+        "name": { "type": "string", "description": "Full name of the user" },
+        "passwordHash": { "type": "string", "description": "Simple password hash/text" },
+        "balance": { "type": "number", "description": "Active wallet balance in TK" },
+        "userProfilePic": { "type": "string", "description": "URL of user profile picture" }
+      },
+      "required": ["email", "name", "passwordHash", "balance"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Top up orders placed by gamers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Order ID e.g. TOPUP-XXXXX" },
+        "playerName": { "type": "string", "description": "Name of game account/character" },
+        "playerUid": { "type": "string", "description": "Player UID in Free Fire" },
+        "productName": { "type": "string", "description": "Name of diamond bundle or offer purchased" },
+        "price": { "type": "number", "description": "Total price paid in TK" },
+        "quantity": { "type": "number", "description": "Quantity purchased" },
+        "status": { "type": "string", "enum": ["pending", "processing", "complete", "failed"], "description": "Current delivery status" },
+        "paymentMethod": { "type": "string", "enum": ["bkash", "nagad", "rocket", "wallet"], "description": "Payment channel used" },
+        "transactionId": { "type": "string", "description": "TxrID from BKash/Nagad/Rocket" },
+        "senderNumber": { "type": "string", "description": "Mobile number of payment sender" },
+        "timestamp": { "type": "string", "description": "Human readable date/time string" },
+        "etaSeconds": { "type": "number", "description": "Simulated remaining delivery duration" },
+        "createdAt": { "type": "number", "description": "Milliseconds timestamp of order creation" },
+        "userEmail": { "type": "string", "description": "Email of user who placed the order" }
+      },
+      "required": ["id", "playerName", "productName", "price", "quantity", "status", "paymentMethod", "timestamp"]
+    },
+    "Deposit": {
+      "title": "Deposit",
+      "description": "Wallet balance load/deposit requests.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Deposit ID e.g. DEP-XXXX" },
+        "paymentMethod": { "type": "string", "enum": ["bkash", "nagad", "rocket"], "description": "Payment channel" },
+        "amount": { "type": "number", "description": "Amount loaded in TK" },
+        "senderNumber": { "type": "string", "description": "Sender payment number" },
+        "transactionId": { "type": "string", "description": "bKash/Nagad/Rocket transaction ID" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"], "description": "Approval status" },
+        "timestamp": { "type": "string", "description": "Human readable date/time string" }
+      },
+      "required": ["id", "paymentMethod", "amount", "senderNumber", "transactionId", "status", "timestamp"]
+    }
+  },
+  "firestore": {
+    "users/{email}": {
+      "schema": "UserAccount",
+      "description": "User profiles and wallet balances."
+    },
+    "orders/{orderId}": {
+      "schema": "Order",
+      "description": "Gaming top-up orders."
+    },
+    "deposits/{depositId}": {
+      "schema": "Deposit",
+      "description": "Wallet deposit transactions."
+    }
+  }
+}

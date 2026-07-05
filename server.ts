@@ -3,6 +3,18 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
 
+import fs from "fs";
+import { initializeApp } from "firebase/app";
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  setDoc, 
+  updateDoc 
+} from "firebase/firestore";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -10,6 +22,37 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// ==========================================
+// FIREBASE / FIRESTORE DATABASE CONFIGURATION
+// ==========================================
+
+let db: any = null;
+
+try {
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const firebaseApp = initializeApp({
+      apiKey: config.apiKey,
+      authDomain: config.authDomain,
+      projectId: config.projectId,
+      storageBucket: config.storageBucket,
+      messagingSenderId: config.messagingSenderId,
+      appId: config.appId,
+    });
+
+    db = config.firestoreDatabaseId 
+      ? getFirestore(firebaseApp, config.firestoreDatabaseId)
+      : getFirestore(firebaseApp);
+    console.log("Firebase initialized successfully with project ID:", config.projectId);
+    console.log("Using Firestore database ID:", config.firestoreDatabaseId || "(default)");
+  } else {
+    console.warn("firebase-applet-config.json not found. Operating with in-memory fallback.");
+  }
+} catch (error) {
+  console.error("Failed to initialize Firebase:", error);
+}
 
 // ==========================================
 // MOCK DATABASE STATE (IN-MEMORY PERSISTENCE)
@@ -40,6 +83,7 @@ interface Order {
   timestamp: string;
   etaSeconds?: number;
   createdAt?: number;
+  userEmail?: string;
 }
 
 interface Deposit {
@@ -53,9 +97,157 @@ interface Deposit {
 }
 
 // Global state
-let walletBalance = 150; // default initial balance to let user try ordering easily
-let userName = "Taisir Foyej";
-let userProfilePic = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120";
+interface UserAccount {
+  email: string;
+  name: string;
+  passwordHash: string;
+  balance: number;
+  userProfilePic: string;
+}
+
+let users: Record<string, UserAccount> = {
+  "taisirfoyej@gmail.com": {
+    email: "taisirfoyej@gmail.com",
+    name: "Taisir Foyej",
+    passwordHash: "123456",
+    balance: 150,
+    userProfilePic: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120"
+  }
+};
+
+let loggedInEmail: string | null = "taisirfoyej@gmail.com";
+
+let walletBalance = 150; // fallback
+let userName = "Taisir Foyej"; // fallback
+let userProfilePic = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120"; // fallback
+
+// ==========================================
+// FIREBASE / FIRESTORE DATA ACCESS HELPERS
+// ==========================================
+
+async function getFirebaseUsers(): Promise<Record<string, UserAccount>> {
+  if (!db) return users;
+  try {
+    const querySnapshot = await getDocs(collection(db, "users"));
+    const fbUsers: Record<string, UserAccount> = {};
+    querySnapshot.forEach((doc) => {
+      fbUsers[doc.id] = doc.data() as UserAccount;
+    });
+
+    // If Firebase is empty but we have local defaults, seed them
+    if (Object.keys(fbUsers).length === 0 && Object.keys(users).length > 0) {
+      console.log("Firebase users collection is empty. Seeding with default users...");
+      for (const email in users) {
+        await setDoc(doc(db, "users", email), users[email]);
+      }
+      return users;
+    }
+
+    if (Object.keys(fbUsers).length > 0) {
+      users = fbUsers;
+    }
+    return users;
+  } catch (error) {
+    console.error("Error fetching users from Firebase:", error);
+    return users;
+  }
+}
+
+async function saveFirebaseUser(user: UserAccount): Promise<void> {
+  if (db) {
+    try {
+      await setDoc(doc(db, "users", user.email), user);
+    } catch (error) {
+      console.error("Error saving user to Firebase:", error);
+    }
+  }
+  users[user.email] = user;
+}
+
+async function getFirebaseOrders(): Promise<Order[]> {
+  if (!db) return orders;
+  try {
+    const querySnapshot = await getDocs(collection(db, "orders"));
+    const fbOrders: Order[] = [];
+    querySnapshot.forEach((doc) => {
+      fbOrders.push(doc.data() as Order);
+    });
+    
+    fbOrders.sort((a, b) => {
+      const aTime = a.createdAt || 0;
+      const bTime = b.createdAt || 0;
+      return bTime - aTime;
+    });
+
+    if (fbOrders.length > 0) {
+      orders = fbOrders;
+    }
+    return orders;
+  } catch (error) {
+    console.error("Error fetching orders from Firebase:", error);
+    return orders;
+  }
+}
+
+async function saveFirebaseOrder(order: Order): Promise<void> {
+  if (db) {
+    try {
+      await setDoc(doc(db, "orders", order.id), order);
+    } catch (error) {
+      console.error("Error saving order to Firebase:", error);
+    }
+  }
+  const existingIdx = orders.findIndex(o => o.id === order.id);
+  if (existingIdx >= 0) {
+    orders[existingIdx] = order;
+  } else {
+    orders.unshift(order);
+  }
+}
+
+async function getFirebaseDeposits(): Promise<Deposit[]> {
+  if (!db) return deposits;
+  try {
+    const querySnapshot = await getDocs(collection(db, "deposits"));
+    const fbDeposits: Deposit[] = [];
+    querySnapshot.forEach((doc) => {
+      fbDeposits.push(doc.data() as Deposit);
+    });
+
+    fbDeposits.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+    if (fbDeposits.length > 0) {
+      deposits = fbDeposits;
+    }
+    return deposits;
+  } catch (error) {
+    console.error("Error fetching deposits from Firebase:", error);
+    return deposits;
+  }
+}
+
+async function saveFirebaseDeposit(deposit: Deposit): Promise<void> {
+  if (db) {
+    try {
+      await setDoc(doc(db, "deposits", deposit.id), deposit);
+    } catch (error) {
+      console.error("Error saving deposit to Firebase:", error);
+    }
+  }
+  const existingIdx = deposits.findIndex(d => d.id === deposit.id);
+  if (existingIdx >= 0) {
+    deposits[existingIdx] = deposit;
+  } else {
+    deposits.unshift(deposit);
+  }
+}
+
+function getCurrentUser(): UserAccount | null {
+  if (loggedInEmail && users[loggedInEmail]) {
+    return users[loggedInEmail];
+  }
+  return null;
+}
 
 let products: Product[] = [
   // Free Fire (UID) top up
@@ -476,21 +668,28 @@ function analyzePageContent(html: string, url: string) {
 // ==========================================
 
 // 1. Get entire app state (Wallet, Products, Orders, Deposits)
-app.get("/api/app-state", (req, res) => {
+app.get("/api/app-state", async (req, res) => {
+  const currentUsers = await getFirebaseUsers();
+  const currentOrders = await getFirebaseOrders();
+  const currentDeposits = await getFirebaseDeposits();
+  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+
   return res.json({
-    wallet: {
-      balance: walletBalance,
-      userName,
-      userProfilePic,
-    },
+    loggedIn: !!user,
+    wallet: user ? {
+      balance: user.balance,
+      userName: user.name,
+      userProfilePic: user.userProfilePic,
+      email: user.email,
+    } : null,
     products,
-    orders,
-    deposits
+    orders: currentOrders,
+    deposits: currentDeposits
   });
 });
 
 // 2. Add Money / Wallet deposit request
-app.post("/api/add-money", (req, res) => {
+app.post("/api/add-money", async (req, res) => {
   const { paymentMethod, amount, senderNumber, transactionId } = req.body;
   if (!paymentMethod || !amount || !senderNumber || !transactionId) {
     return res.status(400).json({ error: "সকল তথ্য প্রদান করা আবশ্যক!" });
@@ -511,14 +710,27 @@ app.post("/api/add-money", (req, res) => {
     timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
   };
 
-  deposits.unshift(newDeposit);
-  walletBalance += amt; // Add balance automatically to wallet
+  await saveFirebaseDeposit(newDeposit);
+  const currentUsers = await getFirebaseUsers();
+  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  if (user) {
+    user.balance += amt;
+    await saveFirebaseUser(user);
+  } else {
+    walletBalance += amt; // Add balance automatically to wallet fallback
+  }
   console.log(`New deposit submitted and auto-approved: ${amount} TK via ${paymentMethod}`);
 
+  const latestDeposits = await getFirebaseDeposits();
   return res.json({
     message: "আপনার ট্রানজেকশনটি সফলভাবে যাচাই করা হয়েছে এবং ওয়ালেট ব্যালেন্স যোগ করা হয়েছে!",
-    deposits,
-    wallet: {
+    deposits: latestDeposits,
+    wallet: user ? {
+      balance: user.balance,
+      userName: user.name,
+      userProfilePic: user.userProfilePic,
+      email: user.email,
+    } : {
       balance: walletBalance,
       userName,
       userProfilePic
@@ -527,7 +739,7 @@ app.post("/api/add-money", (req, res) => {
 });
 
 // 3. Create a top-up order
-app.post("/api/topup-order", (req, res) => {
+app.post("/api/topup-order", async (req, res) => {
   const { playerName, playerUid, productId, quantity, paymentMethod, transactionId, senderNumber } = req.body;
   
   if (!playerName || !productId) {
@@ -542,13 +754,22 @@ app.post("/api/topup-order", (req, res) => {
   const qty = parseInt(quantity || 1);
   const totalPrice = product.price * qty;
 
+  const currentUsers = await getFirebaseUsers();
+  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+
   // Check if wallet payment is selected but insufficient balance
   if (paymentMethod === "wallet") {
-    if (walletBalance < totalPrice) {
-      return res.status(400).json({ error: `আপনার ওয়ালেটে পর্যাপ্ত ব্যালেন্স নেই! প্রয়োজন ${totalPrice} TK, কিন্তু আছে ${walletBalance} TK` });
+    const activeBalance = user ? user.balance : walletBalance;
+    if (activeBalance < totalPrice) {
+      return res.status(400).json({ error: `আপনার ওয়ালেটে পর্যাপ্ত ব্যালেন্স নেই! প্রয়োজন ${totalPrice} TK, কিন্তু আছে ${activeBalance} TK` });
     }
     // Deduct balance instantly
-    walletBalance -= totalPrice;
+    if (user) {
+      user.balance -= totalPrice;
+      await saveFirebaseUser(user);
+    } else {
+      walletBalance -= totalPrice;
+    }
   }
 
   const newOrder: Order = {
@@ -565,21 +786,29 @@ app.post("/api/topup-order", (req, res) => {
     timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
     etaSeconds: 45,
     createdAt: Date.now(),
+    userEmail: user ? user.email : undefined
   };
 
-  orders.unshift(newOrder);
+  await saveFirebaseOrder(newOrder);
   console.log(`New top-up order created: ${product.name} for ${playerName}`);
 
   // Automatically complete order after 45 seconds to simulate manual delivery
-  setTimeout(() => {
+  setTimeout(async () => {
     newOrder.status = "complete";
+    await saveFirebaseOrder(newOrder);
     console.log(`Order ${newOrder.id} auto-completed by server simulator`);
   }, 45000);
 
+  const latestOrders = await getFirebaseOrders();
   return res.json({
     message: "অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে! এটি বর্তমানে প্রসেসিং অবস্থায় রয়েছে এবং শীঘ্রই ডেলিভার করা হবে।",
-    orders,
-    wallet: {
+    orders: latestOrders,
+    wallet: user ? {
+      balance: user.balance,
+      userName: user.name,
+      userProfilePic: user.userProfilePic,
+      email: user.email
+    } : {
       balance: walletBalance,
       userName,
       userProfilePic
@@ -588,9 +817,10 @@ app.post("/api/topup-order", (req, res) => {
 });
 
 // 4. Admin endpoint: Approve Deposit Request
-app.post("/api/admin/approve-deposit", (req, res) => {
+app.post("/api/admin/approve-deposit", async (req, res) => {
   const { depositId } = req.body;
-  const deposit = deposits.find(d => d.id === depositId);
+  const currentDeposits = await getFirebaseDeposits();
+  const deposit = currentDeposits.find(d => d.id === depositId);
   
   if (!deposit) {
     return res.status(404).json({ error: "ডিপোজিট রিকোয়েস্টটি পাওয়া যায়নি!" });
@@ -601,13 +831,28 @@ app.post("/api/admin/approve-deposit", (req, res) => {
   }
 
   deposit.status = "approved";
-  walletBalance += deposit.amount; // Add to balance
+  await saveFirebaseDeposit(deposit);
+
+  const currentUsers = await getFirebaseUsers();
+  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  if (user) {
+    user.balance += deposit.amount;
+    await saveFirebaseUser(user);
+  } else {
+    walletBalance += deposit.amount; // Add to balance
+  }
   console.log(`Deposit ${depositId} approved! Added ${deposit.amount} TK to user wallet.`);
 
+  const latestDeposits = await getFirebaseDeposits();
   return res.json({
     message: `সফলভাবে ${deposit.amount} TK ওয়ালেটে যোগ করা হয়েছে!`,
-    deposits,
-    wallet: {
+    deposits: latestDeposits,
+    wallet: user ? {
+      balance: user.balance,
+      userName: user.name,
+      userProfilePic: user.userProfilePic,
+      email: user.email,
+    } : {
       balance: walletBalance,
       userName,
       userProfilePic
@@ -616,9 +861,10 @@ app.post("/api/admin/approve-deposit", (req, res) => {
 });
 
 // 5. Admin endpoint: Reject Deposit Request
-app.post("/api/admin/reject-deposit", (req, res) => {
+app.post("/api/admin/reject-deposit", async (req, res) => {
   const { depositId } = req.body;
-  const deposit = deposits.find(d => d.id === depositId);
+  const currentDeposits = await getFirebaseDeposits();
+  const deposit = currentDeposits.find(d => d.id === depositId);
   
   if (!deposit) {
     return res.status(404).json({ error: "ডিপোজিট রিকোয়েস্টটি পাওয়া যায়নি!" });
@@ -629,18 +875,21 @@ app.post("/api/admin/reject-deposit", (req, res) => {
   }
 
   deposit.status = "rejected";
+  await saveFirebaseDeposit(deposit);
   console.log(`Deposit ${depositId} rejected.`);
 
+  const latestDeposits = await getFirebaseDeposits();
   return res.json({
     message: "ডিপোজিট রিকোয়েস্টটি রিজেক্ট করা হয়েছে।",
-    deposits
+    deposits: latestDeposits
   });
 });
 
 // 6. Admin endpoint: Update Order Status (Pending -> Processing -> Complete -> Failed)
-app.post("/api/admin/update-order-status", (req, res) => {
+app.post("/api/admin/update-order-status", async (req, res) => {
   const { orderId, status } = req.body;
-  const order = orders.find(o => o.id === orderId);
+  const currentOrders = await getFirebaseOrders();
+  const order = currentOrders.find(o => o.id === orderId);
 
   if (!order) {
     return res.status(404).json({ error: "অর্ডারটি খুঁজে পাওয়া যায়নি!" });
@@ -648,18 +897,34 @@ app.post("/api/admin/update-order-status", (req, res) => {
 
   const oldStatus = order.status;
   order.status = status;
+  await saveFirebaseOrder(order);
   console.log(`Order ${orderId} status changed from ${oldStatus} to ${status}`);
 
   // Refund wallet if order is marked failed
+  const currentUsers = await getFirebaseUsers();
+  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
   if (status === "failed" && order.paymentMethod === "wallet") {
-    walletBalance += order.price;
-    console.log(`Refunded ${order.price} TK to user due to failed order.`);
+    const targetEmail = order.userEmail || (user ? user.email : null);
+    if (targetEmail && currentUsers[targetEmail]) {
+      currentUsers[targetEmail].balance += order.price;
+      await saveFirebaseUser(currentUsers[targetEmail]);
+      console.log(`Refunded ${order.price} TK to user ${targetEmail} due to failed order.`);
+    } else {
+      walletBalance += order.price;
+      console.log(`Refunded ${order.price} TK to fallback wallet due to failed order.`);
+    }
   }
 
+  const latestOrders = await getFirebaseOrders();
   return res.json({
     message: `অর্ডারের স্ট্যাটাস পরিবর্তন করে '${status}' করা হয়েছে।`,
-    orders,
-    wallet: {
+    orders: latestOrders,
+    wallet: user ? {
+      balance: user.balance,
+      userName: user.name,
+      userProfilePic: user.userProfilePic,
+      email: user.email,
+    } : {
       balance: walletBalance,
       userName,
       userProfilePic
@@ -689,9 +954,23 @@ app.post("/api/admin/update-product", (req, res) => {
 });
 
 // 8. Admin endpoint: Reset entire database state to defaults
-app.post("/api/admin/reset", (req, res) => {
+app.post("/api/admin/reset", async (req, res) => {
   walletBalance = 150;
-  orders = [
+  userName = "Taisir Foyej";
+  userProfilePic = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120";
+
+  const defaultUser: UserAccount = {
+    email: "taisirfoyej@gmail.com",
+    name: "Taisir Foyej",
+    passwordHash: "123456",
+    balance: 150,
+    userProfilePic: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120"
+  };
+
+  await saveFirebaseUser(defaultUser);
+  loggedInEmail = "taisirfoyej@gmail.com";
+
+  const defaultOrders: Order[] = [
     {
       id: "TOPUP-89302",
       playerName: "Joy11 Ydjdjd",
@@ -701,6 +980,7 @@ app.post("/api/admin/reset", (req, res) => {
       status: "complete",
       paymentMethod: "wallet",
       timestamp: "2026-07-05 08:32",
+      createdAt: Date.now() - 3600000,
     },
     {
       id: "TOPUP-89295",
@@ -714,6 +994,7 @@ app.post("/api/admin/reset", (req, res) => {
       transactionId: "BKX9DJS9D2",
       senderNumber: "01755123456",
       timestamp: "2026-07-05 08:15",
+      createdAt: Date.now() - 7200000,
     },
     {
       id: "TOPUP-89281",
@@ -727,9 +1008,11 @@ app.post("/api/admin/reset", (req, res) => {
       transactionId: "NGD8KWS7H1",
       senderNumber: "01911987654",
       timestamp: "2026-07-05 07:55",
-    },
+      createdAt: Date.now() - 10800000,
+    }
   ];
-  deposits = [
+
+  const defaultDeposits: Deposit[] = [
     {
       id: "DEP-1029",
       paymentMethod: "bkash",
@@ -749,15 +1032,155 @@ app.post("/api/admin/reset", (req, res) => {
       timestamp: "2026-07-05 07:15",
     }
   ];
+
+  users = {
+    "taisirfoyej@gmail.com": defaultUser
+  };
+  orders = [];
+  deposits = [];
+
+  for (const order of defaultOrders) {
+    await saveFirebaseOrder(order);
+  }
+  for (const deposit of defaultDeposits) {
+    await saveFirebaseDeposit(deposit);
+  }
+
+  const latestOrders = await getFirebaseOrders();
+  const latestDeposits = await getFirebaseDeposits();
+  const latestUsers = await getFirebaseUsers();
+  const user = loggedInEmail && latestUsers[loggedInEmail] ? latestUsers[loggedInEmail] : null;
+
   return res.json({
     message: "স্টেট সফলভাবে রিসেট করা হয়েছে!",
-    wallet: {
+    wallet: user ? {
+      balance: user.balance,
+      userName: user.name,
+      userProfilePic: user.userProfilePic,
+      email: user.email
+    } : {
       balance: walletBalance,
       userName,
       userProfilePic
     },
-    orders,
-    deposits
+    orders: latestOrders,
+    deposits: latestDeposits
+  });
+});
+
+
+// 8.5. API Endpoint: Update User Profile (display name and profile picture)
+app.post("/api/update-profile", async (req, res) => {
+  const { name, profilePic } = req.body;
+  if (!name || name.trim() === "") {
+    return res.status(400).json({ error: "ইউজারনেম খালি হতে পারে না!" });
+  }
+
+  const currentUsers = await getFirebaseUsers();
+  const user = loggedInEmail && currentUsers[loggedInEmail] ? currentUsers[loggedInEmail] : null;
+  if (user) {
+    user.name = name.trim();
+    if (profilePic !== undefined) {
+      user.userProfilePic = profilePic.trim();
+    }
+    await saveFirebaseUser(user);
+  } else {
+    userName = name.trim();
+    if (profilePic !== undefined) {
+      userProfilePic = profilePic.trim();
+    }
+  }
+
+  const updatedUsers = await getFirebaseUsers();
+  const updatedUser = loggedInEmail && updatedUsers[loggedInEmail] ? updatedUsers[loggedInEmail] : null;
+  return res.json({
+    message: "প্রোফাইল সফলভাবে আপডেট করা হয়েছে!",
+    wallet: updatedUser ? {
+      balance: updatedUser.balance,
+      userName: updatedUser.name,
+      userProfilePic: updatedUser.userProfilePic,
+      email: updatedUser.email
+    } : {
+      balance: walletBalance,
+      userName,
+      userProfilePic
+    }
+  });
+});
+
+
+// 8.6. API Endpoint: User Registration (নিবন্ধন)
+app.post("/api/register", async (req, res) => {
+  const { email, name, password, profilePic } = req.body;
+  
+  if (!email || !name || !password) {
+    return res.status(400).json({ error: "ইমেইল, নাম এবং পাসওয়ার্ড দেওয়া আবশ্যক!" });
+  }
+  
+  const cleanEmail = email.trim().toLowerCase();
+  const currentUsers = await getFirebaseUsers();
+  if (currentUsers[cleanEmail]) {
+    return res.status(400).json({ error: "এই ইমেইলটি দিয়ে ইতিমধ্যেই অ্যাকাউন্ট খোলা হয়েছে!" });
+  }
+  
+  const newUser: UserAccount = {
+    email: cleanEmail,
+    name: name.trim(),
+    passwordHash: password,
+    balance: 100, // 100 TK sign up bonus!
+    userProfilePic: profilePic ? profilePic.trim() : "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120"
+  };
+  
+  await saveFirebaseUser(newUser);
+  loggedInEmail = cleanEmail;
+  
+  return res.json({
+    message: "রেজিস্ট্রেশন সফল হয়েছে! আপনাকে ১০০ TK বোনাস দেওয়া হয়েছে।",
+    wallet: {
+      balance: newUser.balance,
+      userName: newUser.name,
+      userProfilePic: newUser.userProfilePic,
+      email: newUser.email
+    }
+  });
+});
+
+
+// 8.7. API Endpoint: User Login (লগইন)
+app.post("/api/login", async (req, res) => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: "ইমেইল এবং পাসওয়ার্ড প্রদান করুন!" });
+  }
+  
+  const cleanEmail = email.trim().toLowerCase();
+  const currentUsers = await getFirebaseUsers();
+  const user = currentUsers[cleanEmail];
+  
+  if (!user || user.passwordHash !== password) {
+    return res.status(401).json({ error: "ইমেইল অথবা পাসওয়ার্ডটি সঠিক নয়!" });
+  }
+  
+  loggedInEmail = cleanEmail;
+  
+  return res.json({
+    message: "লগইন সফল হয়েছে!",
+    wallet: {
+      balance: user.balance,
+      userName: user.name,
+      userProfilePic: user.userProfilePic,
+      email: user.email
+    }
+  });
+});
+
+
+// 8.8. API Endpoint: User Logout (লগআউট)
+app.post("/api/logout", (req, res) => {
+  loggedInEmail = null;
+  return res.json({
+    message: "সফলভাবে লগআউট করা হয়েছে!"
   });
 });
 
@@ -1080,6 +1503,19 @@ async function startServer() {
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
+  }
+
+  // Warm up Firestore cache
+  try {
+    if (db) {
+      console.log("Warming up Firestore data caches...");
+      await getFirebaseUsers();
+      await getFirebaseOrders();
+      await getFirebaseDeposits();
+      console.log("Firestore caches loaded successfully!");
+    }
+  } catch (err) {
+    console.error("Failed to warm up Firestore data:", err);
   }
 
   app.listen(PORT, "0.0.0.0", () => {

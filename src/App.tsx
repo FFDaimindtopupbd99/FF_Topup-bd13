@@ -33,14 +33,81 @@ import {
   Youtube,
   Menu,
   Check,
-  ChevronRight
+  ChevronRight,
+  Bell,
+  Edit,
+  Lock
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { CheckSiteResult, PageAnalysis, Order, Deposit, Product, ChatMessage } from "./types";
 
 export default function App() {
   // Global states synced with Express backend
-  const [wallet, setWallet] = useState({ balance: 150, userName: "Taisir Foyej", userProfilePic: "" });
+  const [wallet, setWallet] = useState<{ balance: number; userName: string; userProfilePic: string; email?: string } | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authProfilePic, setAuthProfilePic] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail.trim() || !authPassword.trim()) {
+      triggerToast("ইমেইল এবং পাসওয়ার্ড প্রদান করুন!", "error");
+      return;
+    }
+    if (authMode === "register" && !authName.trim()) {
+      triggerToast("আপনার নাম প্রদান করুন!", "error");
+      return;
+    }
+
+    setAuthLoading(true);
+    try {
+      const url = authMode === "login" ? "/api/login" : "/api/register";
+      const body = authMode === "login" 
+        ? { email: authEmail, password: authPassword }
+        : { email: authEmail, name: authName, password: authPassword, profilePic: authProfilePic };
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      
+      if (!res.ok) {
+        triggerToast(data.error || "অথেন্টিকেশন ব্যর্থ হয়েছে!", "error");
+      } else {
+        setWallet(data.wallet);
+        setIsLoggedIn(true);
+        triggerToast(data.message || "লগইন সফল হয়েছে!", "success");
+        // Clear auth inputs
+        setAuthEmail("");
+        setAuthName("");
+        setAuthPassword("");
+        setAuthProfilePic("");
+      }
+    } catch (err) {
+      triggerToast("সার্ভার কানেকশন ত্রুটি!", "error");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      const res = await fetch("/api/logout", { method: "POST" });
+      if (res.ok) {
+        setWallet(null);
+        setIsLoggedIn(false);
+        triggerToast("লগআউট করা হয়েছে!", "info");
+      }
+    } catch (err) {
+      triggerToast("লগআউট ব্যর্থ হয়েছে!", "error");
+    }
+  };
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [deposits, setDeposits] = useState<Deposit[]>([]);
@@ -98,6 +165,62 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
   const [now, setNow] = useState(Date.now());
 
+  // Notification states
+  const [unreadCompletedOrderIds, setUnreadCompletedOrderIds] = useState<string[]>([]);
+
+  // Profile edit states
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editProfilePic, setEditProfilePic] = useState("");
+
+  // Sound effect synthesizer (Dual-tone chime via Web Audio API)
+  const playNotificationSound = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      const nowTime = ctx.currentTime;
+      
+      // Chime Tone 1
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = "sine";
+      osc1.frequency.setValueAtTime(523.25, nowTime); // C5
+      osc1.frequency.exponentialRampToValueAtTime(880, nowTime + 0.12); // A5
+      gain1.gain.setValueAtTime(0.12, nowTime);
+      gain1.gain.exponentialRampToValueAtTime(0.001, nowTime + 0.5);
+      
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+      
+      // Chime Tone 2 (Harmony)
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = "sine";
+      osc2.frequency.setValueAtTime(659.25, nowTime); // E5
+      osc2.frequency.exponentialRampToValueAtTime(1046.50, nowTime + 0.12); // C6
+      gain2.gain.setValueAtTime(0.08, nowTime);
+      gain2.gain.exponentialRampToValueAtTime(0.001, nowTime + 0.7);
+      
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      
+      osc1.start(nowTime);
+      osc1.stop(nowTime + 0.5);
+      osc2.start(nowTime);
+      osc2.stop(nowTime + 0.7);
+    } catch (e) {
+      console.warn("Audio Context sound synthesis failed/blocked:", e);
+    }
+  };
+
+  // Clear badges when viewing the orders tab
+  useEffect(() => {
+    if (activeScreen === "orders") {
+      setUnreadCompletedOrderIds([]);
+    }
+  }, [activeScreen]);
+
   // Fetch initial app state
   const fetchAppState = async () => {
     try {
@@ -105,8 +228,36 @@ export default function App() {
       const data = await response.json();
       if (data) {
         setWallet(data.wallet);
+        setIsLoggedIn(data.loggedIn);
         setProducts(data.products);
-        setOrders(data.orders);
+        
+        // Diff incoming order statuses with current order statuses to trigger real-time completed notification
+        setOrders((prevOrders) => {
+          if (prevOrders && prevOrders.length > 0) {
+            data.orders.forEach((newOrder: Order) => {
+              const oldOrder = prevOrders.find((o) => o.id === newOrder.id);
+              // Check transition from pending/processing to complete
+              if (
+                oldOrder &&
+                (oldOrder.status === "pending" || oldOrder.status === "processing") &&
+                newOrder.status === "complete"
+              ) {
+                // Play notification sound & show visual badge + toast
+                playNotificationSound();
+                triggerToast(`🎉 অর্ডার ${newOrder.id} সফলভাবে সম্পন্ন হয়েছে!`, "success");
+                
+                setUnreadCompletedOrderIds((prev) => {
+                  if (!prev.includes(newOrder.id)) {
+                    return [...prev, newOrder.id];
+                  }
+                  return prev;
+                });
+              }
+            });
+          }
+          return data.orders;
+        });
+
         setDeposits(data.deposits);
         
         // Default selected product
@@ -153,6 +304,31 @@ export default function App() {
     setTimeout(() => {
       setToast(null);
     }, 4000);
+  };
+
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editName.trim()) {
+      triggerToast("ইউজারনেম খালি হতে পারে না!", "error");
+      return;
+    }
+    try {
+      const res = await fetch("/api/update-profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: editName, profilePic: editProfilePic })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        triggerToast(data.error || "প্রোফাইল আপডেট ব্যর্থ হয়েছে!", "error");
+      } else {
+        setWallet(data.wallet);
+        setIsEditingProfile(false);
+        triggerToast("🎉 প্রোফাইল সফলভাবে আপডেট করা হয়েছে!", "success");
+      }
+    } catch (error) {
+      triggerToast("সার্ভার ত্রুটি, আবার চেষ্টা করুন!", "error");
+    }
   };
 
   // Run security scan
@@ -443,7 +619,7 @@ export default function App() {
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 bg-slate-900/60 rounded-xl overflow-hidden shadow-lg ring-1 ring-slate-850 flex items-center justify-center">
               <img 
-                src="https://chatgpt.com/s/m_6a4a7b1a108c819197b52d3321cce55e" 
+                src="https://www.image2url.com/r2/default/images/1783266428950-d78cd0bf-fc80-41ae-84f4-ee7c14f70361.png" 
                 alt="Logo" 
                 className="w-full h-full object-cover"
                 referrerPolicy="no-referrer"
@@ -451,7 +627,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-violet-400 via-fuchsia-400 to-indigo-400 bg-clip-text text-transparent">
-                BD TOP UP Trust Center & App Simulator
+                FFBD TOP UP Trust Center & App Simulator
               </h1>
               <p className="text-xs text-slate-400">
                 ইন্টারেক্টিভ মোবাইল ডায়মন্ড টপ-আপ সিস্টেম ও ট্রাস্ট অ্যানালাইজার
@@ -686,13 +862,168 @@ export default function App() {
               {/* Simulated Mobile Application Viewport */}
               <div className="flex-1 overflow-y-auto bg-[#121420] flex flex-col relative">
                 
-                {/* 1. Brand Header */}
-                <div className="bg-[#0f111a] border-b border-slate-800/60 p-4 sticky top-0 z-30 flex justify-between items-center">
+                {!isLoggedIn || !wallet ? (
+                  <div className="flex-1 flex flex-col justify-center items-center px-6 py-8 bg-[#121420] relative">
+                    {/* Glowing backdrop circle */}
+                    <div className="absolute top-1/4 w-32 h-32 rounded-full bg-violet-600/20 blur-[40px] pointer-events-none" />
+                    
+                    <div className="w-full max-w-[340px] z-10">
+                      <div className="text-center mb-6">
+                        <div className="w-14 h-14 bg-gradient-to-tr from-violet-600 to-fuchsia-600 rounded-2xl mx-auto flex items-center justify-center shadow-lg shadow-violet-900/30 mb-3 ring-1 ring-violet-500/20 animate-pulse">
+                          <Shield className="w-7 h-7 text-white" />
+                        </div>
+                        <h3 className="text-xl font-black text-white tracking-wider">FFBD TOP UP</h3>
+                        <p className="text-xs text-slate-400 mt-1">লগইন অথবা রেজিস্টার করে টপ-আপ শুরু করুন</p>
+                      </div>
+
+                      {/* Tab Switcher */}
+                      <div className="bg-slate-950/60 p-1.5 rounded-xl border border-slate-800/80 mb-5 flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setAuthMode("login")}
+                          className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-300 ${
+                            authMode === "login"
+                              ? "bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-md shadow-violet-900/20"
+                              : "text-slate-400 hover:text-slate-200"
+                          }`}
+                        >
+                          লগইন
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAuthMode("register")}
+                          className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-300 ${
+                            authMode === "register"
+                              ? "bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-md shadow-violet-900/20"
+                              : "text-slate-400 hover:text-slate-200"
+                          }`}
+                        >
+                          নিবন্ধন (Register)
+                        </button>
+                      </div>
+
+                      {/* Auth Form */}
+                      <form onSubmit={handleAuthSubmit} className="space-y-4">
+                        {authMode === "register" && (
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">আপনার নাম</label>
+                            <div className="relative">
+                              <span className="absolute inset-y-0 left-3 flex items-center text-slate-500">
+                                <User className="w-4 h-4" />
+                              </span>
+                              <input
+                                type="text"
+                                required
+                                placeholder="যেমন: আবির হাসান"
+                                value={authName}
+                                onChange={(e) => setAuthName(e.target.value)}
+                                className="w-full bg-[#0f111a] border border-slate-800/80 focus:border-violet-600 rounded-xl py-2.5 pl-10 pr-4 text-xs text-white focus:outline-none transition-all"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">ইমেইল এড্রেস</label>
+                          <div className="relative">
+                            <span className="absolute inset-y-0 left-3 flex items-center text-slate-500">
+                              <Globe className="w-4 h-4" />
+                            </span>
+                            <input
+                              type="email"
+                              required
+                              placeholder="যেমন: name@example.com"
+                              value={authEmail}
+                              onChange={(e) => setAuthEmail(e.target.value)}
+                              className="w-full bg-[#0f111a] border border-slate-800/80 focus:border-violet-600 rounded-xl py-2.5 pl-10 pr-4 text-xs text-white focus:outline-none transition-all"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">পাসওয়ার্ড</label>
+                          <div className="relative">
+                            <span className="absolute inset-y-0 left-3 flex items-center text-slate-500">
+                              <Lock className="w-4 h-4" />
+                            </span>
+                            <input
+                              type="password"
+                              required
+                              placeholder="কমপক্ষে ৬টি সংখ্যা বা অক্ষর"
+                              value={authPassword}
+                              onChange={(e) => setAuthPassword(e.target.value)}
+                              className="w-full bg-[#0f111a] border border-slate-800/80 focus:border-violet-600 rounded-xl py-2.5 pl-10 pr-4 text-xs text-white focus:outline-none transition-all"
+                            />
+                          </div>
+                        </div>
+
+                        {authMode === "register" && (
+                          <div className="space-y-2">
+                            <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">প্রোফাইল ছবি সিলেক্ট করুন</label>
+                            {/* Avatar preset selection */}
+                            <div className="flex gap-2 justify-between pb-1">
+                              {[
+                                "https://images.unsplash.com/photo-1566492031773-4f4e44671857?auto=format&fit=crop&q=80&w=120",
+                                "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=120",
+                                "https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&q=80&w=120",
+                                "https://images.unsplash.com/photo-1580489944761-15a19d654956?auto=format&fit=crop&q=80&w=120"
+                              ].map((url, idx) => (
+                                <button
+                                  type="button"
+                                  key={url}
+                                  onClick={() => setAuthProfilePic(url)}
+                                  className={`w-9 h-9 rounded-full overflow-hidden border-2 transition-all ${
+                                    authProfilePic === url ? "border-violet-500 scale-110 ring-2 ring-violet-500/20" : "border-slate-800 hover:border-slate-700"
+                                  }`}
+                                >
+                                  <img src={url} alt={`Avatar ${idx}`} className="w-full h-full object-cover" />
+                                </button>
+                              ))}
+                            </div>
+                            <input
+                              type="text"
+                              placeholder="অথবা কাস্টম ইমেজ URL দিন"
+                              value={authProfilePic}
+                              onChange={(e) => setAuthProfilePic(e.target.value)}
+                              className="w-full bg-[#0f111a] border border-slate-800/80 focus:border-violet-600 rounded-xl py-2 text-xs text-white focus:outline-none px-3 transition-all"
+                            />
+                          </div>
+                        )}
+
+                        <button
+                          type="submit"
+                          disabled={authLoading}
+                          className="w-full bg-gradient-to-r from-violet-600 via-fuchsia-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold py-3 rounded-xl text-xs transition duration-300 shadow-lg shadow-violet-950/20 mt-2 flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          {authLoading ? (
+                            <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                          ) : authMode === "login" ? (
+                            "লগইন করুন"
+                          ) : (
+                            "নিবন্ধন সম্পন্ন করুন (+১০০ TK বোনাস)"
+                          )}
+                        </button>
+                      </form>
+
+                      {/* Demo Accounts Helper */}
+                      <div className="mt-6 p-3.5 bg-slate-900/60 border border-slate-800/80 rounded-xl text-center leading-tight">
+                        <span className="text-[9px] uppercase font-extrabold text-violet-400 tracking-wider block mb-1">ডেমো অ্যাকাউন্ট (পরীক্ষার জন্য)</span>
+                        <div className="text-[10px] text-slate-400 font-mono space-y-0.5 text-center">
+                          <div>ইমেইল: <span className="text-slate-200 font-bold select-all">taisirfoyej@gmail.com</span></div>
+                          <div>পাসওয়ার্ড: <span className="text-slate-200 font-bold select-all">123456</span></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {/* 1. Brand Header */}
+                    <div className="bg-[#0f111a] border-b border-slate-800/60 p-4 sticky top-0 z-30 flex justify-between items-center">
                   <div className="flex items-center gap-2">
                     {/* Brand icon */}
                     <div className="w-9 h-9 bg-slate-900 rounded-lg overflow-hidden shadow ring-1 ring-slate-800 flex items-center justify-center">
                       <img 
-                        src="https://chatgpt.com/s/m_6a4a7b1a108c819197b52d3321cce55e" 
+                        src="https://www.image2url.com/r2/default/images/1783266428950-d78cd0bf-fc80-41ae-84f4-ee7c14f70361.png" 
                         alt="Logo" 
                         className="w-full h-full object-cover"
                         referrerPolicy="no-referrer"
@@ -700,32 +1031,46 @@ export default function App() {
                     </div>
                     <div className="leading-tight">
                       <span className="text-xs text-slate-400 block font-bold tracking-widest uppercase">Platform</span>
-                      <span className="text-sm font-black text-white tracking-wider">SECURE TOP UP</span>
+                      <span className="text-sm font-black text-white tracking-wider">FFBD TOP UP</span>
                     </div>
                   </div>
 
-                  {/* Wallet TK balance button */}
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setActiveScreen("add_money")}
-                      className="px-2.5 py-1.5 bg-violet-600/20 text-violet-300 hover:bg-violet-600 hover:text-white transition rounded-full text-xs font-bold border border-violet-500/20 flex items-center gap-1"
-                    >
-                      <CreditCard className="w-3.5 h-3.5" />
-                      <span>{wallet.balance} TK</span>
-                    </button>
-                    
-                    {/* User profile avatar link */}
-                    <button
-                      onClick={() => setActiveScreen("profile")}
-                      className="w-8 h-8 rounded-full border border-slate-800 bg-slate-900 overflow-hidden flex items-center justify-center"
-                    >
-                      {wallet.userProfilePic ? (
-                        <img src={wallet.userProfilePic} alt="User" className="w-full h-full object-cover" />
-                      ) : (
-                        <User className="w-4 h-4 text-slate-400" />
-                      )}
-                    </button>
-                  </div>
+                   {/* Wallet TK balance button & notifications */}
+                   <div className="flex items-center gap-2">
+                     <button
+                       onClick={() => setActiveScreen("add_money")}
+                       className="px-2.5 py-1.5 bg-violet-600/20 text-violet-300 hover:bg-violet-600 hover:text-white transition rounded-full text-xs font-bold border border-violet-500/20 flex items-center gap-1"
+                     >
+                       <CreditCard className="w-3.5 h-3.5" />
+                       <span>{wallet.balance} TK</span>
+                     </button>
+
+                     {/* Real-time Notification Bell */}
+                     <button
+                       onClick={() => setActiveScreen("orders")}
+                       className="relative p-1.5 border border-slate-800 bg-slate-900 rounded-full hover:bg-slate-850 text-slate-400 hover:text-slate-200 transition"
+                       title="Notifications"
+                     >
+                       <Bell className="w-4 h-4" />
+                       {unreadCompletedOrderIds.length > 0 && (
+                         <span className="absolute -top-1 -right-1 bg-rose-600 text-[7px] font-bold text-white w-3.5 h-3.5 rounded-full flex items-center justify-center animate-pulse ring-1 ring-rose-400">
+                           {unreadCompletedOrderIds.length}
+                         </span>
+                       )}
+                     </button>
+                     
+                     {/* User profile avatar link */}
+                     <button
+                       onClick={() => setActiveScreen("profile")}
+                       className="w-8 h-8 rounded-full border border-slate-800 bg-slate-900 overflow-hidden flex items-center justify-center"
+                     >
+                       {wallet.userProfilePic ? (
+                         <img src={wallet.userProfilePic} alt="User" className="w-full h-full object-cover" />
+                       ) : (
+                         <User className="w-4 h-4 text-slate-400" />
+                       )}
+                     </button>
+                   </div>
                 </div>
 
                 {/* 2. Page Content Rendering */}
@@ -1132,6 +1477,7 @@ export default function App() {
                           )}
 
                           {/* Total Price & Submit button */}
+                          {/* Total Price & Submit button */}
                           <div className="border-t border-slate-850 pt-3 flex items-center justify-between">
                             <div>
                               <span className="text-[10px] text-slate-400 block uppercase font-bold">Total Payable</span>
@@ -1417,48 +1763,116 @@ export default function App() {
                         ←হোম পেজে ফিরে যান
                       </button>
 
-                      <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5 text-center space-y-4">
-                        <div className="w-16 h-16 rounded-full border-2 border-violet-500 bg-slate-900 overflow-hidden flex items-center justify-center mx-auto">
-                          {wallet.userProfilePic ? (
-                            <img src={wallet.userProfilePic} alt="User" className="w-full h-full object-cover" />
-                          ) : (
-                            <User className="w-8 h-8 text-slate-400" />
-                          )}
-                        </div>
+                      {!isEditingProfile ? (
+                        <div className="bg-[#141624] border border-slate-800 rounded-2xl p-5 text-center space-y-4">
+                          <div className="w-16 h-16 rounded-full border-2 border-violet-500 bg-slate-900 overflow-hidden flex items-center justify-center mx-auto animate-pulse-slow">
+                            {wallet.userProfilePic ? (
+                              <img src={wallet.userProfilePic} alt="User" className="w-full h-full object-cover" />
+                            ) : (
+                              <User className="w-8 h-8 text-slate-400" />
+                            )}
+                          </div>
 
-                        <div>
-                          <h3 className="text-sm font-bold text-slate-200">{wallet.userName}</h3>
-                          <p className="text-[10px] text-slate-400 font-mono">ID: 40291924</p>
-                        </div>
-
-                        {/* Stats card */}
-                        <div className="grid grid-cols-2 gap-2 bg-[#0c0d14] rounded-xl p-3 border border-slate-850">
                           <div>
-                            <span className="text-[9px] text-slate-400 uppercase block">Active Wallet</span>
-                            <span className="text-sm font-bold font-mono text-emerald-400">{wallet.balance} TK</span>
+                            <h3 className="text-sm font-bold text-slate-200">{wallet.userName}</h3>
+                            <p className="text-[10px] text-slate-400 font-mono">ID: 40291924</p>
                           </div>
-                          <div>
-                            <span className="text-[9px] text-slate-400 uppercase block">Total Orders</span>
-                            <span className="text-sm font-bold font-mono text-violet-400">{orders.length}</span>
-                          </div>
-                        </div>
 
-                        <div className="text-left text-xs text-slate-300 space-y-2 border-t border-slate-850 pt-3">
-                          <p className="font-bold text-[10px] text-slate-400 uppercase">Account Details</p>
-                          <div className="flex justify-between">
-                            <span className="text-slate-400">Email:</span>
-                            <span className="text-slate-200 font-mono">taisirfoyej@gmail.com</span>
+                          {/* Stats card */}
+                          <div className="grid grid-cols-2 gap-2 bg-[#0c0d14] rounded-xl p-3 border border-slate-850">
+                            <div>
+                              <span className="text-[9px] text-slate-400 uppercase block">Active Wallet</span>
+                              <span className="text-sm font-bold font-mono text-emerald-400">{wallet.balance} TK</span>
+                            </div>
+                            <div>
+                              <span className="text-[9px] text-slate-400 uppercase block">Total Orders</span>
+                              <span className="text-sm font-bold font-mono text-violet-400">{orders.length}</span>
+                            </div>
                           </div>
-                          <div className="flex justify-between">
-                            <span className="text-slate-400">Joined:</span>
-                            <span className="text-slate-200">July 2026</span>
+
+                          <div className="text-left text-xs text-slate-300 space-y-2 border-t border-slate-850 pt-3 pb-2">
+                            <p className="font-bold text-[10px] text-slate-400 uppercase">Account Details</p>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Email:</span>
+                              <span className="text-slate-200 font-mono text-[11px]">taisirfoyej@gmail.com</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Joined:</span>
+                              <span className="text-slate-200">July 2026</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Account Type:</span>
+                              <span className="text-indigo-400 font-bold">Premium Customer</span>
+                            </div>
                           </div>
-                          <div className="flex justify-between">
-                            <span className="text-slate-400">Account Type:</span>
-                            <span className="text-indigo-400 font-bold">Premium Customer</span>
-                          </div>
+
+                          <button
+                            onClick={() => {
+                              setEditName(wallet.userName);
+                              setEditProfilePic(wallet.userProfilePic);
+                              setIsEditingProfile(true);
+                            }}
+                            className="w-full py-2.5 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 hover:border-slate-650 text-slate-200 transition rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm"
+                          >
+                            <Edit className="w-3.5 h-3.5 text-violet-400" />
+                            <span>Edit Profile</span>
+                          </button>
                         </div>
-                      </div>
+                      ) : (
+                        <form onSubmit={handleUpdateProfile} className="bg-[#141624] border border-slate-800 rounded-2xl p-5 space-y-4">
+                          <div className="border-b border-slate-800/60 pb-3 flex items-center gap-2">
+                            <div className="p-1.5 bg-violet-600/10 rounded-lg">
+                              <Edit className="w-4 h-4 text-violet-400" />
+                            </div>
+                            <div>
+                              <h3 className="text-sm font-bold text-slate-200">Edit Profile</h3>
+                              <p className="text-[9px] text-slate-400">আপনার তথ্য পরিবর্তন করুন</p>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Display Name (নাম)</label>
+                            <input
+                              type="text"
+                              value={editName}
+                              onChange={(e) => setEditName(e.target.value)}
+                              placeholder="আপনার নাম লিখুন"
+                              className="w-full px-3 py-2 bg-[#0c0d14] border border-slate-800 focus:border-violet-500 rounded-xl text-xs text-slate-100 outline-none transition"
+                              required
+                            />
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Profile Picture URL (ছবি লিংক)</label>
+                            <input
+                              type="url"
+                              value={editProfilePic}
+                              onChange={(e) => setEditProfilePic(e.target.value)}
+                              placeholder="https://images.unsplash.com/photo-..."
+                              className="w-full px-3 py-2 bg-[#0c0d14] border border-slate-800 focus:border-violet-500 rounded-xl text-xs text-slate-100 outline-none transition font-mono"
+                            />
+                            <p className="text-[9px] text-slate-500 leading-normal">
+                              যেকোনো সক্রিয় ছবি বা ডেমো অ্যাভাটার লিংক ইনপুট করুন।
+                            </p>
+                          </div>
+
+                          <div className="flex gap-2.5 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => setIsEditingProfile(false)}
+                              className="flex-1 py-2 bg-slate-850 hover:bg-slate-800 border border-slate-800 text-slate-300 font-bold text-xs rounded-xl transition"
+                            >
+                              বাতিল
+                            </button>
+                            <button
+                              type="submit"
+                              className="flex-1 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-bold text-xs rounded-xl hover:opacity-90 shadow-lg shadow-violet-900/20 transition"
+                            >
+                              সংরক্ষণ
+                            </button>
+                          </div>
+                        </form>
+                      )}
 
                     </div>
                   )}
@@ -1637,23 +2051,22 @@ export default function App() {
                     className={`flex flex-col items-center justify-center flex-1 transition ${activeScreen === 'add_money' ? 'text-violet-400 font-bold' : 'text-slate-500 hover:text-slate-300'}`}
                   >
                     <CreditCard className="w-4 h-4 mb-0.5" />
-                    <span className="text-[8px]">Add Money</span>
+                    <span className="text-[8px]">Add money</span>
                   </button>
 
-                  <button
-                    onClick={() => setActiveScreen("security")}
-                    className={`flex flex-col items-center justify-center flex-1 transition ${activeScreen === 'security' ? 'text-violet-400 font-bold' : 'text-slate-500 hover:text-slate-300'}`}
-                  >
-                    <Shield className="w-4 h-4 mb-0.5" />
-                    <span className="text-[8px]">Shield AI</span>
-                  </button>
-
-                  <button
+                   <button
                     onClick={() => setActiveScreen("orders")}
                     className={`flex flex-col items-center justify-center flex-1 transition ${activeScreen === 'orders' ? 'text-violet-400 font-bold' : 'text-slate-500 hover:text-slate-300'}`}
                   >
-                    <ShoppingBag className="w-4 h-4 mb-0.5" />
-                    <span className="text-[8px]">Orders</span>
+                    <div className="relative">
+                      <ShoppingBag className="w-4 h-4 mb-0.5" />
+                      {unreadCompletedOrderIds.length > 0 && (
+                        <span className="absolute -top-1.5 -right-1.5 bg-rose-600 text-[8px] font-black text-white w-3.5 h-3.5 rounded-full flex items-center justify-center shadow shadow-rose-950 animate-pulse ring-1 ring-rose-400">
+                          {unreadCompletedOrderIds.length}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[8px]">My order</span>
                   </button>
 
                   <button
@@ -1661,9 +2074,11 @@ export default function App() {
                     className={`flex flex-col items-center justify-center flex-1 transition ${activeScreen === 'profile' ? 'text-violet-400 font-bold' : 'text-slate-500 hover:text-slate-300'}`}
                   >
                     <User className="w-4 h-4 mb-0.5" />
-                    <span className="text-[8px]">Profile</span>
+                    <span className="text-[8px]">Account</span>
                   </button>
                 </div>
+              </>
+            )}
 
                 {/* Phone bottom bar indicator */}
                 <div className="hidden lg:block absolute bottom-1 left-1/2 -translate-x-1/2 w-28 h-1 bg-slate-800 rounded-full z-40 pointer-events-none" />
