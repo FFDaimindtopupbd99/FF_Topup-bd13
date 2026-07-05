@@ -1,0 +1,6 @@
+{
+  "name": "A1BD TOP UP Trust Center & App Simulator",
+  "description": "ইন্টারেক্টিভ মোবাইল ফ্রি ফায়ার ডায়মন্ড টপ-আপ সিমুলেশন প্যানেল ও উন্নত এআই চালিত সিকিউরিটি এবং ট্রাস্ট অ্যানালাইজার যা গেমারদের অ্যাকাউন্ট ও আর্থিক নিরাপত্তা নিশ্চিতে ডোমেন অডিট করে থাকে।",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
